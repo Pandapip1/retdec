@@ -371,6 +371,25 @@ void CallEntry::filterSort(Config* _config)
 {
 	auto& stores = possibleArgStores;
 
+	// Stack reconstruction cannot always turn a pushed argument into an alloca.
+	// In particular, this happens when ESP is loop-carried and its absolute
+	// offset is not known. addCallArgs() still recognizes such pushes from the
+	// paired stack-pointer update. Its backwards scan already encounters x86
+	// pushes in argument order, while sorting an unresolved store as if it were
+	// a register would move it to an arbitrary position.
+	if (_config->getConfig().architecture.isX86())
+	{
+		for (auto* store : stores)
+		{
+			auto* ptr = store->getPointerOperand();
+			if (!_config->isRegister(ptr)
+					&& _config->getStackVariableOffset(ptr).isUndefined())
+			{
+				return;
+			}
+		}
+	}
+
 	std::stable_sort(
 			stores.begin(),
 			stores.end(),
@@ -848,6 +867,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 {
 	NonIterableSet<Value*> disqualifiedValues;
 	unsigned maxUsedRegNum = 0;
+	Value* pendingStackPointer = nullptr;
 	auto* b = call->getParent();
 	Instruction* prev = call;
 	std::set<BasicBlock*> seen;
@@ -889,8 +909,33 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		{
 			auto* val = store->getValueOperand();
 			auto* ptr = store->getPointerOperand();
+			bool isUnresolvedX86Push = false;
 
-			if (!_config->isStackVariable(ptr) && !_config->isRegister(ptr))
+			// A decoded x86 push is represented by two stores:
+			//
+			//   store argument, inttoptr(new_sp)
+			//   store new_sp, esp
+			//
+			// StackAnalysis normally replaces the first destination with a stack
+			// alloca. If ESP is loop-carried, however, new_sp is not reducible to
+			// an absolute offset and the destination stays dynamic. We walk
+			// backwards, so remember the ESP update and associate it with the
+			// preceding store through the same (possibly cast) value.
+			if (_config->getConfig().architecture.isX86()
+					&& _config->isStackPointerRegister(ptr))
+			{
+				pendingStackPointer = llvm_utils::skipCasts(val);
+			}
+			else if (pendingStackPointer != nullptr)
+			{
+				isUnresolvedX86Push =
+						llvm_utils::skipCasts(ptr) == pendingStackPointer;
+				pendingStackPointer = nullptr;
+			}
+
+			if (!isUnresolvedX86Push
+					&& !_config->isStackVariable(ptr)
+					&& !_config->isRegister(ptr))
 			{
 				disqualifiedValues.insert(ptr);
 			}
@@ -912,7 +957,9 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 
 			if (disqualifiedValues.hasNot(ptr)
 					&& !_config->isFlagRegister(ptr)
-					&& (isa<AllocaInst>(ptr) || _config->isRegister(ptr)))
+					&& (isa<AllocaInst>(ptr)
+							|| _config->isRegister(ptr)
+							|| isUnresolvedX86Push))
 			{
 				ce.possibleArgStores.push_back(store);
 				disqualifiedValues.insert(ptr);
