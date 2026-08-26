@@ -35,6 +35,7 @@ class StackAnalysis : public llvm::ModulePass
 
 	private:
 		bool run();
+		bool reconstructDynamicStackAccesses();
 		void handleInstruction(
 				ReachingDefinitionsAnalysis& RDA,
 				llvm::Instruction* inst,
