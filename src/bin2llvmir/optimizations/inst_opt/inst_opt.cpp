@@ -5,6 +5,7 @@
  */
 
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/IR/Module.h>
 
 #include "retdec/bin2llvmir/optimizations/inst_opt/inst_opt.h"
 
@@ -363,37 +364,54 @@ llvm::Value* castSequence(llvm::CastInst* cast1, llvm::CastInst* cast2)
 {
 	auto* src = cast1->getOperand(0);
 	auto* srcTy = cast1->getSrcTy();
+	auto* midTy = cast1->getDestTy();
 	auto* dstTy = cast2->getDestTy();
 
-	Value* v = nullptr;
-
-	// int -> cast -> cast -> int
-	if (srcTy->isIntegerTy() && dstTy->isIntegerTy())
-	{
-		bool sign = cast1->getOpcode() == Instruction::SIToFP
-				|| cast2->getOpcode() == Instruction::FPToSI;
-		v = srcTy != dstTy
-				? CastInst::CreateIntegerCast(src, dstTy, sign, "", cast2)
-				: src;
-	}
-	// ptr -> cast -> cast -> ptr
-	else if (srcTy->isPointerTy() && dstTy->isPointerTy())
-	{
-		v = srcTy != dstTy
-				? CastInst::CreatePointerCast(src, dstTy, "", cast2)
-				: src;
-	}
-	// float -> cast -> cast -> float
-	else if (srcTy->isFloatingPointTy() && dstTy->isFloatingPointTy())
-	{
-		v = srcTy != dstTy
-				? CastInst::CreateFPCast(src, dstTy, "", cast2)
-				: src;
-	}
-	else
+	auto* module = cast2->getModule();
+	if (module == nullptr)
 	{
 		return nullptr;
 	}
+	auto& dataLayout = module->getDataLayout();
+	auto getIntPtrType = [&dataLayout](Type* type) -> Type*
+	{
+		return type->isPtrOrPtrVectorTy()
+				? dataLayout.getIntPtrType(type)
+				: nullptr;
+	};
+
+	auto resultOpcode = CastInst::isEliminableCastPair(
+			cast1->getOpcode(),
+			cast2->getOpcode(),
+			srcTy,
+			midTy,
+			dstTy,
+			getIntPtrType(srcTy),
+			getIntPtrType(midTy),
+			getIntPtrType(dstTy));
+	if (resultOpcode == 0)
+	{
+		return nullptr;
+	}
+
+	// Do not introduce a pointer/integer conversion with a width different
+	// from the target's pointer width. This mirrors LLVM's InstCombine guard.
+	if ((resultOpcode == Instruction::IntToPtr
+				&& srcTy != getIntPtrType(dstTy))
+			|| (resultOpcode == Instruction::PtrToInt
+				&& dstTy != getIntPtrType(srcTy)))
+	{
+		return nullptr;
+	}
+
+	Value* v = srcTy == dstTy
+			? src
+			: CastInst::Create(
+					Instruction::CastOps(resultOpcode),
+					src,
+					dstTy,
+					"",
+					cast2);
 
 	cast2->replaceAllUsesWith(v);
 	cast2->eraseFromParent();
@@ -412,16 +430,10 @@ llvm::Value* castSequenceFinder(llvm::Value* insn)
 	auto* cast2 = dyn_cast<CastInst>(insn);
 	auto* cast1 = cast2 ? dyn_cast<CastInst>(cast2->getOperand(0)) : nullptr;
 
-	while (cast1)
-	{
-		if (auto* v = castSequence(cast1, cast2))
-		{
-			return v;
-		}
-		cast1 = dyn_cast<CastInst>(cast1->getOperand(0));
-	}
-
-	return nullptr;
+	// Only adjacent casts form a pair. Skipping a non-eliminable intermediate
+	// cast can discard its narrowing or signedness semantics, and also violates
+	// CastInst::isEliminableCastPair()'s SrcTy -> MidTy -> DstTy contract.
+	return cast1 ? castSequence(cast1, cast2) : nullptr;
 }
 
 /**
