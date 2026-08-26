@@ -4,12 +4,18 @@
 * @copyright (c) 2017 Avast Software, licensed under the MIT license
 */
 
+#include <algorithm>
 #include <cassert>
 #include <iomanip>
+#include <limits>
+#include <vector>
 
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Metadata.h>
 
 #include "retdec/bin2llvmir/utils/llvm.h"
 #include "retdec/utils/string.h"
@@ -24,7 +30,115 @@ using namespace llvm;
 namespace retdec {
 namespace bin2llvmir {
 
+namespace {
+
+const char* STACK_FRAME_ATTRIBUTE = "retdec.stack.frame";
+const char* STACK_FRAME_METADATA = "retdec.stack.variable";
+
+/**
+ * Put all recovered stack objects into one byte-addressable allocation after
+ * parameter and type recovery have finished using independent allocas.
+ */
+bool coalesceStackFrame(Module* module, Config* config, Function& function)
+{
+	struct StackObject
+	{
+		AllocaInst* alloca;
+		int offset;
+	};
+
+	std::vector<StackObject> objects;
+	int64_t minimumOffset = std::numeric_limits<int64_t>::max();
+	int64_t maximumEnd = std::numeric_limits<int64_t>::min();
+	unsigned maximumAlignment = 1;
+	for (Instruction& instruction : function.getEntryBlock())
+	{
+		auto* alloca = dyn_cast<AllocaInst>(&instruction);
+		if (alloca == nullptr)
+		{
+			continue;
+		}
+		if (alloca->getName() == "stack_frame")
+		{
+			return false;
+		}
+		auto offset = config->getStackVariableOffset(alloca);
+		auto* elements = dyn_cast<ConstantInt>(alloca->getArraySize());
+		if (offset.isUndefined() || elements == nullptr)
+		{
+			continue;
+		}
+		uint64_t elementSize = module->getDataLayout().getTypeAllocSize(
+				alloca->getAllocatedType());
+		uint64_t elementCount = elements->getZExtValue();
+		if (elementSize == 0
+				|| elementCount > uint64_t(std::numeric_limits<int>::max()) / elementSize)
+		{
+			continue;
+		}
+		uint64_t size = elementSize * elementCount;
+		int64_t end = int64_t(offset.getValue()) + int64_t(size);
+		objects.push_back({alloca, offset.getValue()});
+		minimumOffset = std::min(minimumOffset, int64_t(offset.getValue()));
+		maximumEnd = std::max(maximumEnd, end);
+		maximumAlignment = std::max(
+				maximumAlignment,
+				std::max(
+						alloca->getAlignment(),
+						module->getDataLayout().getABITypeAlignment(
+								alloca->getAllocatedType())));
+	}
+	if (objects.empty())
+	{
+		return false;
+	}
+
+	int64_t remainder = minimumOffset % maximumAlignment;
+	if (remainder < 0)
+	{
+		remainder += maximumAlignment;
+	}
+	int64_t frameStart = minimumOffset - remainder;
+	uint64_t frameSize = uint64_t(maximumEnd - frameStart);
+	auto* frameType = ArrayType::get(Type::getInt8Ty(module->getContext()), frameSize);
+	auto* insertionPoint = &*function.getEntryBlock().getFirstInsertionPt();
+	auto* frame = new AllocaInst(frameType, "stack_frame", insertionPoint);
+	frame->setAlignment(maximumAlignment);
+
+	IRBuilder<> builder(insertionPoint);
+	auto* zero = ConstantInt::get(Type::getInt32Ty(module->getContext()), 0);
+	for (const auto& object : objects)
+	{
+		auto* index = ConstantInt::get(
+				Type::getInt32Ty(module->getContext()),
+				uint64_t(int64_t(object.offset) - frameStart));
+		Value* address = builder.CreateInBoundsGEP(
+				frame,
+				{zero, index},
+				object.alloca->getName() + ".frame.addr");
+		Value* alias = builder.CreateBitCast(
+				address,
+				object.alloca->getType(),
+				object.alloca->getName() + ".frame");
+		if (auto* aliasInstruction = dyn_cast<Instruction>(alias))
+		{
+			aliasInstruction->setMetadata(
+					STACK_FRAME_METADATA,
+					MDNode::get(
+							module->getContext(),
+							MDString::get(
+									module->getContext(),
+									object.alloca->getName())));
+		}
+		object.alloca->replaceAllUsesWith(alias);
+	}
+	return true;
+}
+
+} // anonymous namespace
+
 char StackPointerOpsRemove::ID = 0;
+char StackFrameCoalescing::ID = 0;
 
 static RegisterPass<StackPointerOpsRemove> X(
 		"retdec-stack-ptr-op-remove",
@@ -32,6 +146,50 @@ static RegisterPass<StackPointerOpsRemove> X(
 		false, // Only looks at CFG
 		false // Analysis Pass
 );
+
+static RegisterPass<StackFrameCoalescing> Y(
+		"stack-frame",
+		"Coalesce overlapping recovered stack objects",
+		false,
+		false
+);
+
+StackFrameCoalescing::StackFrameCoalescing() :
+		ModulePass(ID)
+{
+
+}
+
+bool StackFrameCoalescing::runOnModule(Module& M)
+{
+	_module = &M;
+	_config = ConfigProvider::getConfig(&M);
+	return run();
+}
+
+bool StackFrameCoalescing::runOnModuleCustom(Module& M, Config* c)
+{
+	_module = &M;
+	_config = c;
+	return run();
+}
+
+bool StackFrameCoalescing::run()
+{
+	if (_config == nullptr)
+	{
+		return false;
+	}
+	bool changed = false;
+	for (Function& function : *_module)
+	{
+		if (!function.empty() && function.hasFnAttribute(STACK_FRAME_ATTRIBUTE))
+		{
+			changed |= coalesceStackFrame(_module, _config, function);
+		}
+	}
+	return changed;
+}
 
 StackPointerOpsRemove::StackPointerOpsRemove() :
 		ModulePass(ID)
