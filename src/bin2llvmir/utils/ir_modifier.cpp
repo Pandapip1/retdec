@@ -722,7 +722,12 @@ llvm::Value* IrModifier::changeObjectDeclarationType(
 
 	if (auto* alloca = dyn_cast<AllocaInst>(val))
 	{
-		auto* ret = new AllocaInst(toType, alloca->getName(), alloca);
+		auto* ret = new AllocaInst(
+				toType,
+				alloca->getArraySize(),
+				alloca->getName(),
+				alloca);
+		ret->setAlignment(alloca->getAlignment());
 		ret->takeName(alloca);
 		return ret;
 	}
