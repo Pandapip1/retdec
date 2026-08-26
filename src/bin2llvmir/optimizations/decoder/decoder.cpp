@@ -1028,20 +1028,16 @@ bool Decoder::getJumpTargetSwitch(
 	// 8D44 loc_8D44:
 	//               switch
 	//
-	if (defAddr.isUndefined()
-			|| (armCondBr == nullptr
-					&& (brToSwitch == nullptr || brToSwitchCondVal == nullptr)))
+	bool hasExplicitDefault = defAddr.isDefined()
+			&& (armCondBr != nullptr
+					|| (brToSwitch != nullptr && brToSwitchCondVal != nullptr));
+	if (hasExplicitDefault)
 	{
-		LOG << "\t\t\t" << "no default target -> skip" << std::endl;
-		// TODO: detected labels still should become jump targets.
-		// problem, we don't know the jump target type -> they can be functions,
-		// not just branch targets.
-		// e.g. 04023A3 @ call ds:___CTOR_LIST__[ebx*4]
-		return false;
+		LOG << "\t\t\t" << "default label @ " << defAddr << std::endl;
 	}
 	else
 	{
-		LOG << "\t\t\t" << "default label @ " << defAddr << std::endl;
+		LOG << "\t\t\t" << "no explicit default target" << std::endl;
 	}
 
 	// Jump table size.
@@ -1257,6 +1253,18 @@ if (brToSwitch)
 		LOG << "\t\t\t" << "no targets @ " << tableAddr << " -> skip"
 				<< std::endl;
 		return false;
+	}
+	if (!hasExplicitDefault)
+	{
+		// Some compilers omit a bounds check when the jump-table index is
+		// constrained by the code that reaches the indirect branch (for
+		// example, an index masked immediately before a shared tail table).
+		// Such a table has no reachable default edge.  Use one of its cases as
+		// the structurally required LLVM default instead of leaving the pseudo
+		// branch unresolved; the latter is subsequently mistaken for a return.
+		defAddr = cases.front();
+		LOG << "\t\t\t" << "implicit exhaustive default @ " << defAddr
+				<< std::endl;
 	}
 	Address tableAddrEnd = tableItemAddr;
 

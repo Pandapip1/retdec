@@ -1876,7 +1876,20 @@ ShPtr<Value> OrigLLVMIR2BIRConverter::visitSwitchInst(llvm::SwitchInst &si) {
 	// one predecessor, generate it after the switch instruction.
 	bool defaultBBGenerated = false;
 	llvm::BasicBlock *defaultBB = si.getDefaultDest();
-	if (defaultBB->getUniquePredecessor()) {
+	if (branchInfo->isSuccHeaderOfInnerLoop(si.getParent(), defaultBB)) {
+		// A switch edge to the current loop header is a back edge.  Do not
+		// recursively emit the loop again: besides duplicating its body, that
+		// recursion eventually hits visitBasicBlockOrLoop()'s safety limit and
+		// leaves a malformed switch in the generated BIR.
+		ShPtr<Statement> phiCopies(getPHICopiesForSuccessor(
+			si.getParent(), defaultBB));
+		ShPtr<ContinueStmt> continueStmt(ContinueStmt::create());
+		continueStmt->setMetadata("continue -> " +
+			labelsHandler->getLabel(defaultBB));
+		switchStmt->addDefaultClause(Statement::mergeStatements(
+			phiCopies, continueStmt));
+		defaultBBGenerated = true;
+	} else if (defaultBB->getUniquePredecessor()) {
 		switchStmt->addDefaultClause(getDefaultSwitchBlock(
 			defaultBB, si.getNumOperands() >= 4 ?
 				llvm::cast<llvm::BasicBlock>(si.getOperand(3)) : nullptr));
