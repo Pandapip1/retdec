@@ -958,17 +958,25 @@ ShPtr<Statement> OrigLLVMIR2BIRConverter::visitBasicBlockOrLoop(llvm::BasicBlock
 		bool genTerm) {
 	PRECONDITION_NON_NULL(bb);
 
-	// Check whether bb has been processed too many times. If so, then do not
-	// process it again to obviate a possible infinite loop. Even though the
-	// basic support of goto statements is done, it may work improperly in some
-	// cases. This is why there is the following check to avoid infinite
-	// recursion. The number 25 below has no greater meaning; it's just a
-	// number that popped into my mind (and all backend tests pass correctly).
+	// Check whether bb has been processed too many times. This can happen for
+	// irreducible control flow or when common-destination analysis cannot
+	// structure a highly connected region. Preserve the CFG edge as a goto
+	// instead of truncating the function at an empty statement. The target may
+	// still be under construction, in which case it is patched after all
+	// missing basic blocks have been generated.
 	if (++processedBBs[bb] > 25) {
-		ShPtr<Statement> emptyStmt(EmptyStmt::create());
-		addDebugCommentToStatement(emptyStmt,
-			"Detected a possible infinite recursion (goto support failed); quitting...");
-		return emptyStmt;
+		ShPtr<GotoStmt> gotoStmt;
+		auto target = bbStmtMap.find(bb);
+		if (target != bbStmtMap.end()) {
+			gotoStmt = GotoStmt::create(target->second);
+			setGotoTargetLabel(target->second, bb);
+		} else {
+			gotoStmt = GotoStmt::create(EmptyStmt::create());
+			addGotoStmtToPatch(gotoStmt, bb);
+		}
+		gotoStmt->setMetadata("goto recursion fallback -> " +
+			labelsHandler->getLabel(bb));
+		return gotoStmt;
 	}
 
 	if (llvm::Loop *l = branchInfo->getLoopFor(bb)) {

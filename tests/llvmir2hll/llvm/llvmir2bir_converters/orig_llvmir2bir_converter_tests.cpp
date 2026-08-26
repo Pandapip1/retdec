@@ -9,6 +9,7 @@
 #include "retdec/llvmir2hll/ir/const_int.h"
 #include "retdec/llvmir2hll/ir/continue_stmt.h"
 #include "retdec/llvmir2hll/ir/function.h"
+#include "retdec/llvmir2hll/ir/goto_stmt.h"
 #include "retdec/llvmir2hll/ir/int_type.h"
 #include "retdec/llvmir2hll/ir/module.h"
 #include "retdec/llvmir2hll/ir/switch_stmt.h"
@@ -17,6 +18,7 @@
 #include "retdec/llvmir2hll/llvm/llvmir2bir_converters/orig_llvmir2bir_converter.h"
 #include "llvmir2hll/llvm/llvmir2bir_converter_tests.h"
 #include "retdec/llvmir2hll/support/smart_ptr.h"
+#include "retdec/llvmir2hll/support/visitors/ordered_all_visitor.h"
 #include "retdec/llvmir2hll/utils/ir.h"
 
 using namespace ::testing;
@@ -24,6 +26,29 @@ using namespace ::testing;
 namespace retdec {
 namespace llvmir2hll {
 namespace tests {
+
+class RecursionFallbackFinder final: private OrderedAllVisitor {
+public:
+	static bool hasFallback(ShPtr<Statement> statement) {
+		RecursionFallbackFinder finder;
+		finder.visitStmt(statement);
+		return finder.found;
+	}
+
+private:
+	RecursionFallbackFinder(): OrderedAllVisitor(), found(false) {}
+
+	using OrderedAllVisitor::visit;
+	void visit(ShPtr<GotoStmt> statement) override {
+		if (statement->getMetadata().find("goto recursion fallback -> ") == 0) {
+			found = true;
+		}
+		OrderedAllVisitor::visit(statement);
+	}
+
+private:
+	bool found;
+};
 
 /**
 * @brief Tests for the @c orig_llvmir2bir_converter module.
@@ -94,6 +119,51 @@ SwitchDefaultBackEdgeToCurrentLoopIsConvertedToContinue) {
 		skipEmptyStmts(innerSwitch->getDefaultClauseBody()));
 	ASSERT_TRUE(continueStmt);
 	ASSERT_EQ("continue -> loop", continueStmt->getMetadata());
+}
+
+TEST_F(OrigLLVMIR2BIRConverterTests,
+RepeatedSwitchTargetRecursionIsPreservedAsGoto) {
+	auto module = convertLLVMIR2BIR(R"(
+		define i32 @function(i32 %selector) {
+		entry:
+			switch i32 %selector, label %exit [
+				i32 0, label %shared
+				i32 1, label %shared
+				i32 2, label %shared
+				i32 3, label %shared
+				i32 4, label %shared
+				i32 5, label %shared
+				i32 6, label %shared
+				i32 7, label %shared
+				i32 8, label %shared
+				i32 9, label %shared
+				i32 10, label %shared
+				i32 11, label %shared
+				i32 12, label %shared
+				i32 13, label %shared
+				i32 14, label %shared
+				i32 15, label %shared
+				i32 16, label %shared
+				i32 17, label %shared
+				i32 18, label %shared
+				i32 19, label %shared
+				i32 20, label %shared
+				i32 21, label %shared
+				i32 22, label %shared
+				i32 23, label %shared
+				i32 24, label %shared
+				i32 25, label %shared
+			]
+		shared:
+			ret i32 1
+		exit:
+			ret i32 0
+		}
+	)");
+
+	auto function = module->getFuncByName("function");
+	ASSERT_TRUE(function);
+	ASSERT_TRUE(RecursionFallbackFinder::hasFallback(function->getBody()));
 }
 
 } // namespace tests
