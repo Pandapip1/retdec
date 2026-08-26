@@ -581,6 +581,7 @@ TEST_F(OptimizeTests, addSequence)
 TEST_F(OptimizeTests, castSequence_ptr_int_ptr)
 {
 	parseInput(R"(
+		target datalayout = "e-p:32:32"
 		@r = global i32* null
 		declare i32 @print (i8*)
 		define void @func() {
@@ -596,6 +597,7 @@ TEST_F(OptimizeTests, castSequence_ptr_int_ptr)
 	bool ret = inst_opt::optimize(i);
 
 	std::string exp = R"(
+		target datalayout = "e-p:32:32"
 		@r = global i32* null
 		declare i32 @print (i8*)
 		define void @func() {
@@ -666,6 +668,7 @@ TEST_F(OptimizeTests, castSequence_float_int_float_local)
 TEST_F(OptimizeTests, castSequence_ptr_int_ptr_global)
 {
 	parseInput(R"(
+		target datalayout = "e-p:32:32"
 		@gv = global float 0.000000e+00
 		declare void @print (float*)
 		define void @func() {
@@ -686,6 +689,7 @@ TEST_F(OptimizeTests, castSequence_ptr_int_ptr_global)
 	ret |= inst_opt::optimize(d);
 
 	std::string exp = R"(
+		target datalayout = "e-p:32:32"
 		@gv = global float 0.000000e+00
 		declare void @print (float*)
 		define void @func() {
@@ -724,6 +728,92 @@ TEST_F(OptimizeTests, castSequence_float_int_flot_global)
 	)";
 	checkModuleAgainstExpectedIr(exp);
 	EXPECT_TRUE(ret);
+}
+
+TEST_F(OptimizeTests, castSequenceDoesNotDropSignedNarrowingFromI64)
+{
+	parseInput(R"(
+		@reg = global i64 0
+		define i32 @func() {
+			%a = load i64, i64* @reg
+			%b = trunc i64 %a to i16
+			%c = sext i16 %b to i32
+			ret i32 %c
+		}
+	)");
+	auto* i = getInstructionByName("c");
+
+	bool ret = inst_opt::optimize(i);
+
+	std::string exp = R"(
+		@reg = global i64 0
+		define i32 @func() {
+			%a = load i64, i64* @reg
+			%b = trunc i64 %a to i16
+			%c = sext i16 %b to i32
+			ret i32 %c
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+	EXPECT_FALSE(ret);
+}
+
+TEST_F(OptimizeTests, castSequenceDoesNotDropSignedNarrowingFromI32)
+{
+	parseInput(R"(
+		@reg = global i32 0
+		define i64 @func() {
+			%a = load i32, i32* @reg
+			%b = trunc i32 %a to i16
+			%c = sext i16 %b to i64
+			ret i64 %c
+		}
+	)");
+	auto* i = getInstructionByName("c");
+
+	bool ret = inst_opt::optimize(i);
+
+	std::string exp = R"(
+		@reg = global i32 0
+		define i64 @func() {
+			%a = load i32, i32* @reg
+			%b = trunc i32 %a to i16
+			%c = sext i16 %b to i64
+			ret i64 %c
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+	EXPECT_FALSE(ret);
+}
+
+TEST_F(OptimizeTests, castSequenceDoesNotSkipNonEliminableIntermediateCast)
+{
+	parseInput(R"(
+		@reg = global i64 0
+		define i32 @func() {
+			%a = load i64, i64* @reg
+			%b = trunc i64 %a to i32
+			%c = trunc i32 %b to i16
+			%d = sext i16 %c to i32
+			ret i32 %d
+		}
+	)");
+	auto* i = getInstructionByName("d");
+
+	bool ret = inst_opt::optimize(i);
+
+	std::string exp = R"(
+		@reg = global i64 0
+		define i32 @func() {
+			%a = load i64, i64* @reg
+			%b = trunc i64 %a to i32
+			%c = trunc i32 %b to i16
+			%d = sext i16 %c to i32
+			ret i32 %d
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+	EXPECT_FALSE(ret);
 }
 
 } // namespace tests
