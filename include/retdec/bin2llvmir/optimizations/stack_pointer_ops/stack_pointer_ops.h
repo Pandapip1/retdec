@@ -34,6 +34,26 @@ class StackPointerOpsRemove : public llvm::ModulePass
 		Config* _config = nullptr;
 };
 
+/**
+ * Lower functions with indexed/overlapping recovered stack accesses into a
+ * byte-addressable frame after signature and type recovery.
+ */
+class StackFrameCoalescing : public llvm::ModulePass
+{
+	public:
+		static char ID;
+		StackFrameCoalescing();
+		virtual bool runOnModule(llvm::Module& M) override;
+		bool runOnModuleCustom(llvm::Module& M, Config* c);
+
+	private:
+		bool run();
+
+	private:
+		llvm::Module* _module = nullptr;
+		Config* _config = nullptr;
+};
+
 } // namespace bin2llvmir
 } // namespace retdec
 

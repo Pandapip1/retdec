@@ -32,7 +32,7 @@ namespace {
 
 struct AffineStackAddress
 {
-	LoadInst* base = nullptr;
+	Value* base = nullptr;
 	int64_t baseCoefficient = 0;
 	int64_t constant = 0;
 	bool hasUnknown = false;
@@ -65,8 +65,21 @@ bool mergeBase(
 AllocaInst* getStackAnchor(
 		Config* config,
 		ReachingDefinitionsAnalysis& rda,
-		LoadInst* load)
+		Value* base)
 {
+	if (auto* address = dyn_cast<PtrToIntInst>(base))
+	{
+		auto* anchor = dyn_cast<AllocaInst>(
+				llvm_utils::skipCasts(address->getPointerOperand()));
+		return anchor != nullptr && config->isStackVariable(anchor)
+				? anchor : nullptr;
+	}
+
+	auto* load = dyn_cast<LoadInst>(base);
+	if (load == nullptr)
+	{
+		return nullptr;
+	}
 	if (!config->isRegister(load->getPointerOperand()))
 	{
 		return nullptr;
@@ -140,6 +153,14 @@ AffineStackAddress analyzeAffineStackAddress(
 
 	if (auto* cast = dyn_cast<CastInst>(value))
 	{
+		if (isa<PtrToIntInst>(cast)
+				&& getStackAnchor(config, rda, cast) != nullptr)
+		{
+			AffineStackAddress result;
+			result.base = cast;
+			result.baseCoefficient = 1;
+			return result;
+		}
 		return analyzeAffineStackAddress(config, rda, cast->getOperand(0));
 	}
 
@@ -347,6 +368,7 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 	std::vector<std::pair<Instruction*, Value*>> accesses;
 	for (Function& function : *_module)
 	{
+		bool functionChanged = false;
 		accesses.clear();
 		for (Instruction& instruction : instructions(function))
 		{
@@ -464,6 +486,14 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 					cloned);
 			memoryInstruction->replaceUsesOfWith(pointer, reconstructedPointer);
 			changed = true;
+			functionChanged = true;
+		}
+		if (functionChanged)
+		{
+			// Parameter and type recovery expect independent allocas. Mark this
+			// function now and lower its recovered objects into one aliased frame
+			// in the later stack-frame pass.
+			function.addFnAttr("retdec.stack.frame");
 		}
 	}
 
