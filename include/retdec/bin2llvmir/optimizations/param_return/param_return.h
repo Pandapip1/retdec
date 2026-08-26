@@ -8,6 +8,7 @@
 #define RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PARAM_RETURN_PARAM_RETURN_H
 
 #include <map>
+#include <set>
 #include <vector>
 
 #include <llvm/IR/Function.h>
@@ -35,12 +36,16 @@ class CallEntry
 		void filterSort(Config* _config);
 		void filterLeaveOnlyContinuousStackOffsets(Config* _config);
 		void filterLeaveOnlyNeededStackOffsets(Config* _config);
+		bool isStackArgumentStore(
+				Config* _config,
+				llvm::StoreInst* store) const;
 
 		void extractFormatString(ReachingDefinitionsAnalysis& _RDA);
 
 	public:
 		llvm::CallInst* call = nullptr;
 		std::vector<llvm::StoreInst*> possibleArgStores;
+		std::set<llvm::StoreInst*> unresolvedStackArgStores;
 		std::vector<llvm::LoadInst*> possibleRetLoads;
 		std::string formatStr;
 };

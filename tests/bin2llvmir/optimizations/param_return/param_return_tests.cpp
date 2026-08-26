@@ -496,6 +496,105 @@ TEST_F(ParamReturnTests, x86PtrCallUnpairedDynamicStoreIsNotAnArgument)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86ExternalCallCountsResolvedAndUnresolvedStackArguments)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare void @consume()
+		define void @fnc1() {
+			%stack_-4 = alloca i32
+			%stack_-8 = alloca i32
+			store i32 222, i32* %stack_-4
+			store i32 111, i32* %stack_-8
+			call void @consume()
+			ret void
+		}
+		define void @fnc2() {
+			%stack_-4 = alloca i32
+			store i32 222, i32* %stack_-4
+			%sp1 = ptrtoint i32* %stack_-4 to i32
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot = inttoptr i32 %sp2 to i32*
+			store i32 111, i32* %slot
+			store i32 %sp2, i32* @esp
+			call void @consume()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "fnc1",
+				"locals" : [
+					{
+						"name" : "stack_-4",
+						"storage" : { "type" : "stack", "value" : -4 }
+					},
+					{
+						"name" : "stack_-8",
+						"storage" : { "type" : "stack", "value" : -8 }
+					}
+				]
+			},
+			{
+				"name" : "fnc2",
+				"locals" : [
+					{
+						"name" : "stack_-4",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	std::string exp = R"(
+		@esp = global i32 0
+		declare void @consume(i32, i32)
+		declare void @0()
+		define void @fnc1() {
+			%stack_-4 = alloca i32
+			%stack_-8 = alloca i32
+			store i32 222, i32* %stack_-4
+			store i32 111, i32* %stack_-8
+			%1 = load i32, i32* %stack_-8
+			%2 = load i32, i32* %stack_-4
+			call void @consume(i32 %1, i32 %2)
+			ret void
+		}
+		define void @fnc2() {
+			%stack_-4 = alloca i32
+			store i32 222, i32* %stack_-4
+			%sp1 = ptrtoint i32* %stack_-4 to i32
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot = inttoptr i32 %sp2 to i32*
+			store i32 111, i32* %slot
+			store i32 %sp2, i32* @esp
+			%1 = load i32, i32* %slot
+			%2 = load i32, i32* %stack_-4
+			call void @consume(i32 %1, i32 %2)
+			ret void
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+}
+
 TEST_F(ParamReturnTests, x86PtrCallOnlyContinuousStackOffsetsAreUsed)
 {
 	parseInput(R"(

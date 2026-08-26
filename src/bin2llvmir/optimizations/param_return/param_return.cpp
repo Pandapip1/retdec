@@ -280,6 +280,14 @@ CallEntry::CallEntry(llvm::CallInst* c) :
 
 }
 
+bool CallEntry::isStackArgumentStore(
+		Config* _config,
+		llvm::StoreInst* store) const
+{
+	return _config->isStackVariable(store->getPointerOperand())
+			|| unresolvedStackArgStores.count(store) != 0;
+}
+
 bool registerCanBeParameterAccordingToAbi(Config* _config, llvm::Value* val)
 {
 	if (!_config->isRegister(val))
@@ -377,17 +385,10 @@ void CallEntry::filterSort(Config* _config)
 	// paired stack-pointer update. Its backwards scan already encounters x86
 	// pushes in argument order, while sorting an unresolved store as if it were
 	// a register would move it to an arbitrary position.
-	if (_config->getConfig().architecture.isX86())
+	if (_config->getConfig().architecture.isX86()
+			&& !unresolvedStackArgStores.empty())
 	{
-		for (auto* store : stores)
-		{
-			auto* ptr = store->getPointerOperand();
-			if (!_config->isRegister(ptr)
-					&& _config->getStackVariableOffset(ptr).isUndefined())
-			{
-				return;
-			}
-		}
+		return;
 	}
 
 	std::stable_sort(
@@ -962,6 +963,10 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 							|| isUnresolvedX86Push))
 			{
 				ce.possibleArgStores.push_back(store);
+				if (isUnresolvedX86Push && !_config->isStackVariable(ptr))
+				{
+					ce.unresolvedStackArgStores.insert(store);
+				}
 				disqualifiedValues.insert(ptr);
 				disqualifiedValues.insert(store);
 
@@ -1252,7 +1257,7 @@ void DataFlowEntry::callsFilterSameNumberOfStacks()
 		std::size_t ss = 0;
 		for (auto* s : ce.possibleArgStores)
 		{
-			if (_config->isStackVariable(s->getPointerOperand()))
+			if (ce.isStackArgumentStore(_config, s))
 			{
 				++ss;
 			}
@@ -1277,7 +1282,7 @@ void DataFlowEntry::callsFilterSameNumberOfStacks()
 		while (it != ce.possibleArgStores.end())
 		{
 			auto* s = *it;
-			if (!_config->isStackVariable(s->getPointerOperand()))
+			if (!ce.isStackArgumentStore(_config, s))
 			{
 				++it;
 				continue;
