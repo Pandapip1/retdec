@@ -738,8 +738,10 @@ llvm::Value* IrModifier::changeObjectDeclarationType(
 		auto* ret = new AllocaInst(
 				toType,
 				Abi::DEFAULT_ADDR_SPACE,
+				alloca->getArraySize(),
 				alloca->getName(),
 				alloca);
+		ret->setAlignment(alloca->getAlignment());
 		ret->takeName(alloca);
 		return ret;
 	}

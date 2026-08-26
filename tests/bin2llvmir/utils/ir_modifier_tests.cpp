@@ -284,6 +284,31 @@ TEST_F(IrModifierTests, modifyDirectCallFullModification)
 }
 
 //
+// changeObjectType()
+//
+
+TEST_F(IrModifierTests, changeObjectTypePreservesAllocaArraySizeAndAlignment)
+{
+	parseInput(R"(
+		define void @fnc() {
+			%stack_array = alloca i32, i32 9, align 8
+			%address = ptrtoint i32* %stack_array to i32
+			ret void
+		}
+	)");
+	auto* stackArray = cast<AllocaInst>(getValueByName("stack_array"));
+	auto config = Config::empty(module.get());
+	IrModifier modifier(module.get(), &config);
+	auto* changed = cast<AllocaInst>(modifier.changeObjectType(
+			nullptr,
+			stackArray,
+			Type::getFloatTy(context)));
+
+	EXPECT_EQ(9u, cast<ConstantInt>(changed->getArraySize())->getZExtValue());
+	EXPECT_EQ(8u, changed->getAlignment());
+}
+
+//
 // modifyFunction
 //
 
