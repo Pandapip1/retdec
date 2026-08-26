@@ -5,6 +5,7 @@
  */
 
 #include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 
 #include "retdec/bin2llvmir/providers/asm_instruction.h"
@@ -208,17 +209,33 @@ retdec::common::Object* Config::getConfigStackVariable(
 		const llvm::Value* val)
 {
 	auto* a = dyn_cast_or_null<AllocaInst>(val);
-	if (a == nullptr)
+	const llvm::Function* function = a != nullptr ? a->getFunction() : nullptr;
+	StringRef name = a != nullptr ? a->getName() : StringRef();
+	if (auto* instruction = dyn_cast_or_null<Instruction>(val))
+	{
+		if (auto* metadata = instruction->getMetadata("retdec.stack.variable"))
+		{
+			if (metadata->getNumOperands() == 1)
+			{
+				if (auto* string = dyn_cast<MDString>(metadata->getOperand(0)))
+				{
+					function = instruction->getFunction();
+					name = string->getString();
+				}
+			}
+		}
+	}
+	if (function == nullptr || name.empty())
 	{
 		return nullptr;
 	}
-	auto* cf = getConfigFunction(a->getFunction());
+	auto* cf = getConfigFunction(function);
 	if (cf == nullptr)
 	{
 		return nullptr;
 	}
 	auto* cl = const_cast<retdec::common::Object*>(
-			cf->locals.getObjectByName(a->getName()));
+			cf->locals.getObjectByName(name));
 	return cl && cl->getStorage().isStack() ? cl : nullptr;
 }
 

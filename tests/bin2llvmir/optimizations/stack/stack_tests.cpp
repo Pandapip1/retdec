@@ -5,6 +5,7 @@
 */
 
 #include "retdec/bin2llvmir/optimizations/stack/stack.h"
+#include "retdec/bin2llvmir/optimizations/stack_pointer_ops/stack_pointer_ops.h"
 #include "retdec/bin2llvmir/providers/abi/abi.h"
 #include "retdec/bin2llvmir/providers/config.h"
 #include "bin2llvmir/utils/llvmir_tests.h"
@@ -111,6 +112,65 @@ TEST_F(StackAnalysisTests, reconstructsTwoObjectsWithoutReplacingSharedFrameBase
 	EXPECT_NE(nullptr, getValueByName("base"));
 	EXPECT_NE(nullptr, getValueByName("first.pointer.stack"));
 	EXPECT_NE(nullptr, getValueByName("second.pointer.stack"));
+}
+
+TEST_F(StackAnalysisTests, coalescesIndexedAndFixedStackObjectViews)
+{
+	parseInput(R"(
+		define void @func(i32 %index, i32 %value) {
+			%stack_var_-776 = alloca i32
+			%stack_var_-772 = alloca i32
+			%stack_var_-768 = alloca i32
+			%stack_var_-548 = alloca i32
+			%base = ptrtoint i32* %stack_var_-776 to i32
+			%scaled = mul i32 %index, 4
+			%address = add i32 %scaled, %base
+			%pointer = inttoptr i32 %address to i32*
+			store i32 %value, i32* %pointer
+			store i32 5, i32* %stack_var_-772
+			store i32 6, i32* %stack_var_-768
+			ret void
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("func");
+	for (int offset : {-776, -772, -768, -548})
+	{
+		std::string name = "stack_var_" + std::to_string(offset);
+		function.locals.insert(retdec::config::Object(
+				name, retdec::config::Storage::onStack(offset)));
+	}
+	config.getConfig().functions.insert(function);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &config, abi));
+	EXPECT_TRUE(module->getFunction("func")->hasFnAttribute("retdec.stack.frame"));
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
+	EXPECT_EQ(232u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	EXPECT_EQ(4u, frame->getAlignment());
+	auto* firstMember = getValueByName("stack_var_-776.frame");
+	auto* secondMember = getValueByName("stack_var_-772.frame");
+	EXPECT_EQ(-776, config.getStackVariableOffset(firstMember).getValue());
+	EXPECT_EQ(-772, config.getStackVariableOffset(secondMember).getValue());
+	auto* base = cast<PtrToIntInst>(getValueByName("base"));
+	EXPECT_EQ(firstMember, base->getPointerOperand());
+	bool fixedMemberUsesFrame = false;
+	for (BasicBlock& block : *module->getFunction("func"))
+	for (Instruction& instruction : block)
+	{
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			auto* value = dyn_cast<ConstantInt>(store->getValueOperand());
+			fixedMemberUsesFrame |= value != nullptr && value->equalsInt(5)
+					&& store->getPointerOperand() == secondMember;
+		}
+	}
+	EXPECT_TRUE(fixedMemberUsesFrame);
+	EXPECT_NE(nullptr, getValueByName("pointer.stack"));
+	EXPECT_FALSE(lowerFrame.runOnModuleCustom(*module, &config));
 }
 
 TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)

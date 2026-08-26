@@ -53,6 +53,7 @@
             "retdec-inst-opt-rda",
             "retdec-inst-opt",
             "retdec-simple-types",
+            "stack-frame",
             "retdec-write-dsm",
             "retdec-remove-asm-instrs",
             "retdec-class-hierarchy",
