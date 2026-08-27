@@ -681,6 +681,26 @@ void DataFlowEntry::filterSortArgLoads()
  */
 void CallEntry::filterLeaveOnlyContinuousStackOffsets(Config* _config)
 {
+	if (_config->getConfig().architecture.isX86()
+			&& !possibleArgStores.empty()
+			&& std::all_of(
+					possibleArgStores.begin(),
+					possibleArgStores.end(),
+					[this](StoreInst* store)
+	{
+		auto instruction = AsmInstruction(store);
+		auto* capstone = instruction.isValid()
+				? instruction.getCapstoneInsn() : nullptr;
+		return capstone != nullptr && capstone->id == X86_INS_PUSH;
+	}))
+	{
+		// A decoded PUSH is an outgoing argument even when StackAnalysis maps
+		// its destination to a source-related or otherwise discontinuous stack
+		// alloca.  The native instruction order (and, when available, caller
+		// cleanup) is a stronger boundary than reconstructed alloca offsets.
+		return;
+	}
+
 	retdec::utils::Maybe<int> prevOff;
 	auto it = possibleArgStores.begin();
 	while (it != possibleArgStores.end())
@@ -1204,6 +1224,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	unsigned nestedCleanupBytes = 0;
 	uint64_t recoveredStackBytes = 0;
 	uint64_t overwrittenReservationBytes = 0;
+	std::set<StoreInst*> provenStackArgStores;
 	AsmInstruction overwrittenReservationAsm;
 	unsigned x86SlotSize = _config->getConfig().architecture.isX86()
 			? _config->getConfig().architecture.getByteSize() : 0;
@@ -1471,6 +1492,10 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				}
 
 				ce.possibleArgStores.push_back(store);
+				if (isStackArgument && hasDecodedStackEffect)
+				{
+					provenStackArgStores.insert(store);
+				}
 				if ((isUnresolvedX86Push || isUnresolvedX86StackBlock)
 						&& !_config->isStackVariable(ptr))
 				{
@@ -1503,44 +1528,65 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	}
 
 	// A caller-side ESP adjustment gives an exact upper bound on the byte width
-	// of x86 stack arguments.  Count the actual rounded store widths rather than
-	// one slot per store: a QWORD x87 argument occupies two i386 slots.  Without
-	// this bound, a store into an ordinary stack local can be mistaken for one
-	// more argument after the real outgoing block has already filled the cleanup.
+	// of x86 stack arguments. Prefer stores with decoded stack effects before
+	// filling the remaining bound with uncertain stack-variable stores. An x87
+	// temporary store may be interleaved between real PUSHes; consuming cleanup
+	// capacity in encounter order would keep that local and discard an earlier
+	// genuine argument. Count rounded byte widths because a QWORD occupies two
+	// i386 slots.
 	if (_config->getConfig().architecture.isX86())
 	{
 		unsigned slotSize = _config->getConfig().architecture.getByteSize();
 		if (cleanupBytes != 0 && slotSize != 0)
 		{
-			uint64_t stackBytes = 0;
+			auto getCandidateBytes = [&](StoreInst* store) -> uint64_t
+			{
+				if (!ce.isStackArgumentStore(_config, store))
+				{
+					return 0;
+				}
+				auto instruction = AsmInstruction(store);
+				auto* capstone = instruction.isValid()
+						? instruction.getCapstoneInsn() : nullptr;
+				uint64_t valueBytes = capstone != nullptr
+							&& capstone->id == X86_INS_PUSH
+						? slotSize
+						: _module->getDataLayout().getTypeStoreSize(
+								store->getValueOperand()->getType());
+				return std::max<uint64_t>(
+						slotSize,
+						((valueBytes + slotSize - 1) / slotSize) * slotSize);
+			};
+
+			uint64_t provenBytes = 0;
+			for (auto* store : ce.possibleArgStores)
+			{
+				if (provenStackArgStores.count(store) != 0)
+				{
+					provenBytes += getCandidateBytes(store);
+				}
+			}
+			uint64_t uncertainBytes = 0;
+			uint64_t uncertainLimit = provenBytes < cleanupBytes
+					? cleanupBytes - provenBytes : 0;
 			auto it = ce.possibleArgStores.begin();
 			while (it != ce.possibleArgStores.end())
 			{
 				auto* store = *it;
-				uint64_t candidateBytes = 0;
-				if (ce.isStackArgumentStore(_config, store))
-				{
-					auto instruction = AsmInstruction(store);
-					auto* capstone = instruction.isValid()
-							? instruction.getCapstoneInsn() : nullptr;
-					uint64_t valueBytes = capstone != nullptr
-								&& capstone->id == X86_INS_PUSH
-							? slotSize
-							: _module->getDataLayout().getTypeStoreSize(
-									store->getValueOperand()->getType());
-					candidateBytes = std::max<uint64_t>(
-							slotSize,
-							((valueBytes + slotSize - 1) / slotSize) * slotSize);
-				}
-				if (candidateBytes != 0
-						&& stackBytes + candidateBytes > cleanupBytes)
+				uint64_t candidateBytes = getCandidateBytes(store);
+				bool isProven = provenStackArgStores.count(store) != 0;
+				if (!isProven && candidateBytes != 0
+						&& uncertainBytes + candidateBytes > uncertainLimit)
 				{
 					ce.unresolvedStackArgStores.erase(store);
 					it = ce.possibleArgStores.erase(it);
 				}
 				else
 				{
-					stackBytes += candidateBytes;
+					if (!isProven)
+					{
+						uncertainBytes += candidateBytes;
+					}
 					++it;
 				}
 			}

@@ -556,6 +556,144 @@ TEST_F(ParamReturnTests, x86DecodedPushSurvivesWithoutPairedEspUpdate)
 	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(123));
 }
 
+TEST_F(ParamReturnTests, x86DecodedPushesIgnoreDiscontinuousRecoveredOffsets)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define void @fnc() {
+			%stack_a = alloca i32
+			%stack_b = alloca i32
+			%x87_local = alloca float
+			store volatile i64 100, i64* @llvm2asm
+			store i32 333, i32* %stack_a
+			store volatile i64 105, i64* @llvm2asm
+			store float 1.000000e+00, float* %x87_local
+			store volatile i64 110, i64* @llvm2asm
+			store i32 222, i32* %stack_b
+			store volatile i64 120, i64* @llvm2asm
+			%sp = load i32, i32* @esp
+			%new_sp = sub i32 %sp, 4
+			%slot = inttoptr i32 %new_sp to i32*
+			store i32 111, i32* %slot
+			store i32 %new_sp, i32* @esp
+			store volatile i64 130, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 140, i64* @llvm2asm
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 12
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "fnc",
+				"locals" : [
+					{
+						"name" : "stack_a",
+						"storage" : { "type" : "stack", "value" : -828 }
+					},
+					{
+						"name" : "stack_b",
+						"storage" : { "type" : "stack", "value" : -756 }
+					},
+					{
+						"name" : "x87_local",
+						"storage" : { "type" : "stack", "value" : -700 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+	cs_insn pushInstruction = {};
+	pushInstruction.id = X86_INS_PUSH;
+	pushInstruction.size = 1;
+	for (uint64_t address : {100, 110, 120})
+	{
+		auto pushAsm = AsmInstruction(module.get(), address);
+		ASSERT_TRUE(pushAsm.isValid());
+		AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+				pushAsm.getLlvmToAsmInstruction()] = &pushInstruction;
+	}
+	cs_insn fstInstruction = {};
+	fstInstruction.id = X86_INS_FST;
+	fstInstruction.size = 1;
+	auto fstAsm = AsmInstruction(module.get(), 105);
+	ASSERT_TRUE(fstAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			fstAsm.getLlvmToAsmInstruction()] = &fstInstruction;
+	cs_insn callInstruction = {};
+	callInstruction.id = X86_INS_CALL;
+	callInstruction.size = 1;
+	auto callAsm = AsmInstruction(module.get(), 130);
+	ASSERT_TRUE(callAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			callAsm.getLlvmToAsmInstruction()] = &callInstruction;
+	cs_insn cleanupInstruction = {};
+	cs_detail cleanupDetail = {};
+	cleanupInstruction.id = X86_INS_ADD;
+	cleanupInstruction.size = 2;
+	cleanupInstruction.detail = &cleanupDetail;
+	cleanupDetail.x86.op_count = 2;
+	cleanupDetail.x86.operands[0].type = X86_OP_REG;
+	cleanupDetail.x86.operands[0].reg = X86_REG_ESP;
+	cleanupDetail.x86.operands[1].type = X86_OP_IMM;
+	cleanupDetail.x86.operands[1].imm = 12;
+	auto cleanupAsm = AsmInstruction(module.get(), 140);
+	ASSERT_TRUE(cleanupAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			cleanupAsm.getLlvmToAsmInstruction()] = &cleanupInstruction;
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(3u, consume->arg_size());
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("fnc"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(3u, recoveredCall->getNumArgOperands());
+	auto* first = dyn_cast<ConstantInt>(recoveredCall->getArgOperand(0));
+	ASSERT_NE(nullptr, first);
+	EXPECT_TRUE(first->equalsInt(111));
+	auto* second = dyn_cast<LoadInst>(recoveredCall->getArgOperand(1));
+	auto* third = dyn_cast<LoadInst>(recoveredCall->getArgOperand(2));
+	ASSERT_NE(nullptr, second);
+	ASSERT_NE(nullptr, third);
+	EXPECT_EQ(getValueByName("stack_b"), second->getPointerOperand());
+	EXPECT_EQ(getValueByName("stack_a"), third->getPointerOperand());
+}
+
 TEST_F(ParamReturnTests, x86RepeatedImmediatePushesIgnoreUnrelatedByteLocal)
 {
 	parseInput(R"(
