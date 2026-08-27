@@ -124,6 +124,8 @@ class ParamReturn : public llvm::ModulePass
 
 		std::map<llvm::CallInst*, std::vector<llvm::Value*>> fetchLoadsOfCalls(
 						const std::vector<CallEntry>& calls) const;
+		void eraseRecoveredX86CallArtifacts(
+						const std::vector<CallEntry>& calls) const;
 
 	private:
 		llvm::Module* _module = nullptr;

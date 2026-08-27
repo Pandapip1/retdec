@@ -4,6 +4,8 @@
 * @copyright (c) 2019 Avast Software, licensed under the MIT license
 */
 
+#include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <optional>
 
@@ -103,6 +105,7 @@ void Filter::filterDefinition(DataFlowEntry* de) const
 	}
 
 	FilterableLayout defArgs = createArgsFilterableLayout(de->args(), de->argTypes());
+	preserveX86DefinitionStackSlots(defArgs);
 	filterDefinitionArgs(defArgs, de->isVoidarg());
 
 	de->setArgs(createGroupedArgValues(defArgs));
@@ -146,7 +149,7 @@ void Filter::filterCalls(DataFlowEntry* de) const
 	for (auto& call : de->callEntries())
 	{
 		callArgs.push_back(
-			createArgsFilterableLayout(call.args(), de->argTypes()));
+			createArgsFilterableLayout(call, de->argTypes()));
 		callRets.push_back(
 			createRetsFilterableLayout(
 				call.retValues(),
@@ -261,7 +264,7 @@ void Filter::filterCallsVariadic(DataFlowEntry* de, const Collector* collector) 
 	{
 		auto argTypes = de->argTypes();
 
-		FilterableLayout argLayout = createArgsFilterableLayout(call.args(), {});
+		FilterableLayout argLayout = createArgsFilterableLayout(call, {});
 
 		// To collect specific types, we need ordered values.
 		// Collector will find first occourence of string and parse it.
@@ -322,6 +325,11 @@ void Filter::filterDefinitionArgs(FilterableLayout& args, bool isVoidarg) const
 		args.vectorRegisters.clear();
 		args.stacks.clear();
 	}
+	else if (args.preserveStackOrder)
+	{
+		createContinuousArgRegisters(args);
+		return;
+	}
 	else if (!args.knownTypes.empty())
 	{
 		filterArgsByKnownTypes(args);
@@ -353,7 +361,10 @@ void Filter::filterCallArgs(FilterableLayout& args, bool isVoidarg) const
 		leaveOnlyContinuousArgRegisters(args);
 	}
 
-	leaveOnlyContinuousStack(args);
+	if (!args.preserveStackOrder)
+	{
+		leaveOnlyContinuousStack(args);
+	}
 }
 
 void Filter::filterCallArgsByDefLayout(
@@ -366,8 +377,19 @@ void Filter::filterCallArgsByDefLayout(
 	args.vectorRegisters = std::vector<uint32_t>(defArgs.vectorRegisters);
 	args.knownOrder = defArgs.knownOrder;
 
-	leaveOnlyContinuousStack(args);
-	leaveSameStacks(args, defArgs);
+	if (!args.preserveStackOrder)
+	{
+		leaveOnlyContinuousStack(args);
+		leaveSameStacks(args, defArgs);
+	}
+	else if (!defArgs.stacks.empty() && args.stacks.size() > defArgs.stacks.size())
+	{
+		args.stacks.resize(defArgs.stacks.size());
+	}
+	else if (!defArgs.stacks.empty())
+	{
+		args.stacks.resize(defArgs.stacks.size(), nullptr);
+	}
 }
 
 void Filter::filterRets(FilterableLayout& rets) const
@@ -399,6 +421,7 @@ void Filter::filterRetsByDefLayout(
 void Filter::filterArgsByKnownTypes(FilterableLayout& lay) const
 {
 	FilterableLayout newLayout;
+	newLayout.preserveStackOrder = lay.preserveStackOrder;
 	auto& gpRegs = _cc->getParamRegisters();
 	auto& fpRegs = _cc->getParamFPRegisters();
 	auto& doubleRegs = _cc->getParamDoubleRegisters();
@@ -863,7 +886,10 @@ void Filter::leaveCommon(std::vector<FilterableLayout>& lays) const
 
 void Filter::orderFiterableLayout(FilterableLayout& lay) const
 {
-	orderStacks(lay.stacks, _cc->getStackParamOrder());
+	if (!lay.preserveStackOrder)
+	{
+		orderStacks(lay.stacks, _cc->getStackParamOrder());
+	}
 	orderRegistersBy(lay.gpRegisters, _cc->getParamRegisters());
 	orderRegistersBy(lay.fpRegisters, _cc->getParamFPRegisters());
 	orderRegistersBy(lay.doubleRegisters, _cc->getParamDoubleRegisters());
@@ -923,6 +949,24 @@ FilterableLayout Filter::createArgsFilterableLayout(
 {
 	FilterableLayout layout = separateArgValues(group);
 	layout.knownTypes = knownTypes;
+	if (_abi->getConfig()->getConfig().architecture.isX86_32()
+			&& std::find(group.begin(), group.end(), nullptr) != group.end())
+	{
+		layout.preserveStackOrder = true;
+	}
+
+	orderFiterableLayout(layout);
+
+	return layout;
+}
+
+FilterableLayout Filter::createArgsFilterableLayout(
+			const CallEntry& call,
+			const std::vector<llvm::Type*>& knownTypes) const
+{
+	FilterableLayout layout = separateArgValues(call);
+	layout.knownTypes = knownTypes;
+	layout.preserveStackOrder = call.preservesNativeStackOrder();
 
 	orderFiterableLayout(layout);
 
@@ -956,7 +1000,37 @@ FilterableLayout Filter::separateArgValues(const std::vector<llvm::Value*>& para
 	auto& doubleRegs = _cc->getParamDoubleRegisters();
 	auto& vecRegs = _cc->getParamVectorRegisters();
 
-	return separateValues(paramValues, regs, fpRegs, doubleRegs, vecRegs);
+	auto layout = separateValues(paramValues, regs, fpRegs, doubleRegs, vecRegs);
+	if (_abi->getConfig()->getConfig().architecture.isX86_32()
+			&& std::find(paramValues.begin(), paramValues.end(), nullptr)
+					!= paramValues.end())
+	{
+		layout.stacks.clear();
+		for (auto* value : paramValues)
+		{
+			if (value == nullptr || _abi->isStackVariable(value))
+			{
+				layout.stacks.push_back(value);
+			}
+		}
+	}
+	return layout;
+}
+
+FilterableLayout Filter::separateArgValues(const CallEntry& call) const
+{
+	auto layout = separateArgValues(call.args());
+	layout.stacks.clear();
+
+	for (auto* value : call.args())
+	{
+		if (call.isDirectArgument(value) || _abi->isStackVariable(value))
+		{
+			layout.stacks.push_back(value);
+		}
+	}
+
+	return layout;
 }
 
 FilterableLayout Filter::separateRetValues(const std::vector<llvm::Value*>& paramValues) const
@@ -983,6 +1057,10 @@ FilterableLayout Filter::separateValues(
 
 	for (auto pv: paramValues)
 	{
+		if (pv == nullptr)
+		{
+			continue;
+		}
 		if (_abi->isStackVariable(pv))
 		{
 			layout.stacks.push_back(pv);
@@ -1167,6 +1245,49 @@ void Filter::leaveOnlyPositiveStacks(FilterableLayout& lay) const
 				return aOff.has_value() && aOff.value() < 0;
 			}),
 		lay.stacks.end());
+}
+
+void Filter::preserveX86DefinitionStackSlots(FilterableLayout& lay) const
+{
+	if (!_abi->getConfig()->getConfig().architecture.isX86_32()
+			|| lay.stacks.empty())
+	{
+		return;
+	}
+
+	auto* config = _abi->getConfig();
+	uint64_t slotSize = config->getConfig().architecture.getByteSize();
+	if (slotSize == 0)
+	{
+		return;
+	}
+
+	std::vector<Value*> physicalSlots;
+	int64_t nextOffset = slotSize;
+	for (auto* value : lay.stacks)
+	{
+		auto offset = config->getStackVariableOffset(value);
+		if (!offset.has_value() || offset.value() < nextOffset)
+		{
+			continue;
+		}
+		while (nextOffset < offset.value())
+		{
+			physicalSlots.push_back(nullptr);
+			nextOffset += slotSize;
+		}
+
+		physicalSlots.push_back(value);
+		auto* pointer = dyn_cast<PointerType>(value->getType());
+		uint64_t valueSize = pointer != nullptr
+				&& pointer->getElementType()->isSized()
+			? _abi->getTypeByteSize(pointer->getElementType()) : slotSize;
+		nextOffset += std::max<uint64_t>(slotSize,
+				((valueSize + slotSize - 1) / slotSize) * slotSize);
+	}
+
+	lay.stacks = std::move(physicalSlots);
+	lay.preserveStackOrder = true;
 }
 
 void Filter::leaveOnlyContinuousStack(FilterableLayout& lay) const

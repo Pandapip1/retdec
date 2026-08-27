@@ -4,6 +4,7 @@
 * @copyright (c) 2019 Avast Software, licensed under the MIT license
 */
 
+#include <algorithm>
 #include <cassert>
 #include <iomanip>
 #include <limits>
@@ -846,10 +847,19 @@ void ParamReturn::modifyType(DataFlowEntry& de) const
 
 	if (de.argTypes().empty())
 	{
-		for (auto& call : de.callEntries())
+		const CallEntry* representative = nullptr;
+		for (const auto& call : de.callEntries())
+		{
+			if (representative == nullptr
+					|| call.args().size() > representative->args().size())
+			{
+				representative = &call;
+			}
+		}
+		if (representative != nullptr)
 		{
 			std::vector<Type*> types;
-			for (auto& arg : call.args())
+			for (auto& arg : representative->args())
 			{
 				if (arg == nullptr)
 				{
@@ -858,15 +868,15 @@ void ParamReturn::modifyType(DataFlowEntry& de) const
 				}
 
 				auto usage = std::find_if(
-						call.argStores().begin(),
-						call.argStores().end(),
+						representative->argStores().begin(),
+						representative->argStores().end(),
 						[arg](StoreInst* s)
 						{
 							return s->getPointerOperand()
 								== arg;
 						});
 
-				if (usage == call.argStores().end())
+				if (usage == representative->argStores().end())
 				{
 
 					if (auto* p = dyn_cast<PointerType>(arg->getType()))
@@ -885,7 +895,6 @@ void ParamReturn::modifyType(DataFlowEntry& de) const
 			}
 
 			de.setArgTypes(std::move(types));
-			break;
 		}
 	}
 
@@ -1027,6 +1036,7 @@ void ParamReturn::applyToIr(DataFlowEntry& de)
 		{
 			IrModifier::modifyCallInst(l.first, de.getRetType(), l.second);
 		}
+		eraseRecoveredX86CallArtifacts(de.callEntries());
 
 		return;
 	}
@@ -1078,6 +1088,21 @@ void ParamReturn::applyToIr(DataFlowEntry& de)
 	{
 		definitionArgTypes.push_back(t != nullptr ? t : _abi->getDefaultType());
 	}
+	if (_config->getConfig().architecture.isX86_32() && !fnc->isDeclaration())
+	{
+		definitionArgs.clear();
+		IrModifier modifier(_module, _config);
+		uint64_t slotSize = _config->getConfig().architecture.getByteSize();
+		int64_t offset = slotSize;
+		for (auto* type : definitionArgTypes)
+		{
+			definitionArgs.push_back(
+					modifier.getStackVariable(fnc, offset, type).first);
+			uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
+			offset += std::max<uint64_t>(slotSize,
+					((size + slotSize - 1) / slotSize) * slotSize);
+		}
+	}
 
 	// Set used calling convention to config
 	auto* cf = _config->getConfigFunction(fnc);
@@ -1099,6 +1124,7 @@ void ParamReturn::applyToIr(DataFlowEntry& de)
 			de.argNames()).first;
 
 	de.setCalledValue(newFnc);
+	eraseRecoveredX86CallArtifacts(de.callEntries());
 }
 
 void ParamReturn::connectWrappers(const DataFlowEntry& de)
@@ -1243,7 +1269,8 @@ std::map<CallInst*, std::vector<Value*>> ParamReturn::fetchLoadsOfCalls(
 				continue;
 			}
 
-			Value* l = new LoadInst(*aIt, "", call);
+			Value* l = e.isDirectArgument(*aIt)
+					? *aIt : new LoadInst(*aIt, "", call);
 
 			if (tIt != types.end())
 			{
@@ -1264,6 +1291,34 @@ std::map<CallInst*, std::vector<Value*>> ParamReturn::fetchLoadsOfCalls(
 	}
 
 	return loadsOfCalls;
+}
+
+void ParamReturn::eraseRecoveredX86CallArtifacts(
+					const std::vector<CallEntry>& calls) const
+{
+	for (const auto& entry : calls)
+	{
+		if (entry.argStores().empty())
+		{
+			continue;
+		}
+
+		for (auto* marker : entry.obsoleteStackCleanupMarkers())
+		{
+			if (marker != nullptr && marker->getParent() != nullptr)
+			{
+				AsmInstruction(marker).eraseInstructions();
+			}
+		}
+
+		for (auto* store : entry.directArgStores())
+		{
+			if (store != nullptr && store->getParent() != nullptr)
+			{
+				store->eraseFromParent();
+			}
+		}
+	}
 }
 
 }

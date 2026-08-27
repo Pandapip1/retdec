@@ -41,6 +41,7 @@ class FilterableLayout
 		std::vector<llvm::Value*> stacks;
 		std::vector<llvm::Type*> knownTypes;
 		std::vector<Order> knownOrder;
+		bool preserveStackOrder = false;
 };
 
 typedef FilterableLayout::Order OrderID;
@@ -110,6 +111,10 @@ class Filter
 			const std::vector<llvm::Value*>& group,
 			const std::vector<llvm::Type*>& knownTypes) const;
 
+		FilterableLayout createArgsFilterableLayout(
+			const CallEntry& call,
+			const std::vector<llvm::Type*>& knownTypes) const;
+
 		FilterableLayout createRetsFilterableLayout(
 			const std::vector<llvm::Value*>& group,
 			llvm::Type* knownType) const;
@@ -120,6 +125,8 @@ class Filter
 
 		virtual FilterableLayout separateArgValues(
 			const std::vector<llvm::Value*>& paramValues) const;
+
+		FilterableLayout separateArgValues(const CallEntry& call) const;
 
 		virtual FilterableLayout separateRetValues(
 			const std::vector<llvm::Value*>& paramValues) const;
@@ -171,6 +178,7 @@ class Filter
 
 	protected:
 		void leaveOnlyPositiveStacks(FilterableLayout& lay) const;
+		void preserveX86DefinitionStackSlots(FilterableLayout& lay) const;
 		void leaveOnlyContinuousStack(FilterableLayout& lay) const;
 		void leaveOnlyContinuousArgRegisters(FilterableLayout& lay) const;
 		void leaveOnlyContinuousRetRegisters(FilterableLayout& lay) const;

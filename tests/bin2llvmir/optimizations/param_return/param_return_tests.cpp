@@ -153,6 +153,215 @@ TEST_F(ParamReturnTests, x86PtrCallBasicFunctionality)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86PtrCallConsumesPairedPushValuesInNativeOrder)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@r = global i32 0
+		define void @fnc() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 333, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 222, i32* %slot2
+			store i32 %sp2, i32* @esp
+			%sp3 = sub i32 %sp2, 4
+			%slot3 = inttoptr i32 %sp3 to i32*
+			store i32 111, i32* %slot3
+			store i32 %sp3, i32* @esp
+			%a = bitcast i32* @r to void()*
+			call void %a()
+			ret void
+		}
+	)");
+	auto c = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto config = Config::fromConfig(module.get(), c);
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto demangler = DemanglerProvider::addDemangler(
+		module.get(), &config, std::move(typeConfig));
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	std::string exp = R"(
+		@esp = global i32 0
+		@r = global i32 0
+		define void @fnc() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 %sp2, i32* @esp
+			%sp3 = sub i32 %sp2, 4
+			%slot3 = inttoptr i32 %sp3 to i32*
+			store i32 %sp3, i32* @esp
+			%a = bitcast i32* @r to void()*
+			%1 = bitcast void ()* %a to void (i32, i32, i32)*
+			call void %1(i32 111, i32 222, i32 333)
+			ret void
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+}
+
+TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare i32 @consume()
+		define void @fnc(i32 %input) {
+			%pushed = add i32 %input, 1
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot = inttoptr i32 %sp1 to i32*
+			store i32 %pushed, i32* %slot
+			store i32 %sp1, i32* @esp
+			call i32 @consume()
+			ret void
+		}
+	)");
+	auto c = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto config = Config::fromConfig(module.get(), c);
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto demangler = DemanglerProvider::addDemangler(
+		module.get(), &config, std::move(typeConfig));
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	std::string exp = R"(
+		@esp = global i32 0
+		declare void @consume(i32)
+		declare i32 @0()
+		define void @fnc(i32 %input) {
+			%pushed = add i32 %input, 1
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot = inttoptr i32 %sp1 to i32*
+			store i32 %sp1, i32* @esp
+			call void @consume(i32 %pushed)
+			ret void
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+}
+
+TEST_F(ParamReturnTests, x86PreservesUnusedMiddleStackArgumentPosition)
+{
+	parseInput(R"(
+		define void @consume() {
+			%first_slot = alloca i32
+			%third_slot = alloca i32
+			%first = load i32, i32* %first_slot
+			%third = load i32, i32* %third_slot
+			ret void
+		}
+		define void @caller() {
+			%first_slot = alloca i32
+			%unused_slot = alloca i32
+			%third_slot = alloca i32
+			store i32 11, i32* %first_slot
+			store i32 22, i32* %unused_slot
+			store i32 33, i32* %third_slot
+			call void @consume()
+			ret void
+		}
+	)");
+	auto c = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"startAddr" : "0x1000",
+				"locals" : [
+					{
+						"name" : "first_slot",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "third_slot",
+						"storage" : { "type" : "stack", "value" : 12 }
+					}
+				]
+			},
+			{
+				"name" : "caller",
+				"startAddr" : "0x2000",
+				"locals" : [
+					{
+						"name" : "first_slot",
+						"storage" : { "type" : "stack", "value" : -12 }
+					},
+					{
+						"name" : "unused_slot",
+						"storage" : { "type" : "stack", "value" : -8 }
+					},
+					{
+						"name" : "third_slot",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		]
+	})");
+	auto config = Config::fromConfig(module.get(), c);
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto demangler = DemanglerProvider::addDemangler(
+		module.get(), &config, std::move(typeConfig));
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(3u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	auto* unusedArgument = &*argument++;
+	auto* unusedSlot = config.getLlvmStackVariable(consume, 8);
+	ASSERT_NE(nullptr, unusedSlot);
+	bool storesUnusedArgument = false;
+	for (auto* user : unusedArgument->users())
+	{
+		if (auto* store = dyn_cast<StoreInst>(user))
+		{
+			storesUnusedArgument |= store->getPointerOperand() == unusedSlot;
+		}
+	}
+	EXPECT_TRUE(storesUnusedArgument);
+	EXPECT_FALSE(argument->use_empty());
+}
+
 TEST_F(ParamReturnTests, x86PtrCallPrevBbIsUsedOnlyIfItIsASinglePredecessor)
 {
 	parseInput(R"(
