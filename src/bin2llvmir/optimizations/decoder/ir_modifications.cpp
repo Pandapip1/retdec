@@ -6,25 +6,64 @@
 
 #include "retdec/bin2llvmir/optimizations/decoder/decoder.h"
 
+#include <cstdlib>
+#include <new>
+
+#include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/Transforms/Utils/Cloning.h>
+
 using namespace retdec::utils;
 using namespace llvm;
 
 namespace retdec {
 namespace bin2llvmir {
 
+namespace {
+
+cs_insn* cloneCapstoneInstruction(const cs_insn* instruction)
+{
+	auto* clone = static_cast<cs_insn*>(std::malloc(sizeof(cs_insn)));
+	if (clone == nullptr)
+	{
+		throw std::bad_alloc();
+	}
+	*clone = *instruction;
+	if (instruction->detail != nullptr)
+	{
+		clone->detail = static_cast<cs_detail*>(std::malloc(sizeof(cs_detail)));
+		if (clone->detail == nullptr)
+		{
+			std::free(clone);
+			throw std::bad_alloc();
+		}
+		*clone->detail = *instruction->detail;
+	}
+	return clone;
+}
+
+} // anonymous namespace
+
 llvm::CallInst* Decoder::transformToCall(
 		llvm::CallInst* pseudo,
-		llvm::Function* callee)
+		llvm::Function* callee,
+		bool branchOrigin)
 {
 	auto* c = CallInst::Create(callee);
 	c->insertAfter(pseudo);
 
+	StoreInst* returnStore = nullptr;
+	Instruction* convertedReturn = nullptr;
 	if (auto* retObj = getCallReturnObject())
 	{
 		auto* cc = cast<Instruction>(
 				IrModifier::convertValueToTypeAfter(c, retObj->getValueType(), c));
-		auto* s = new StoreInst(cc, retObj);
-		s->insertAfter(cc);
+		returnStore = new StoreInst(cc, retObj);
+		returnStore->insertAfter(cc);
+		convertedReturn = cc == c ? nullptr : cc;
+	}
+	if (branchOrigin)
+	{
+		_splitBranchCalls.push_back({c, returnStore, convertedReturn});
 	}
 
 	return c;
@@ -82,6 +121,7 @@ llvm::CallInst* Decoder::transformToCondCall(
 
 	auto* c = CallInst::Create(callee);
 	c->insertAfter(pseudo);
+	_splitBranchCalls.push_back({c, nullptr, nullptr});
 
 	return c;
 }
@@ -605,13 +645,17 @@ llvm::Function* Decoder::splitFunctionOn(
 		{
 			auto* callee = br->getSuccessor(0)->getParent();
 			auto* c = CallInst::Create(callee, "", br);
+			StoreInst* returnStore = nullptr;
+			Instruction* convertedReturn = nullptr;
 			if (auto* retObj = getCallReturnObject())
 			{
 				auto* cc = cast<Instruction>(
 						IrModifier::convertValueToTypeAfter(c, retObj->getValueType(), c));
-				auto* s = new StoreInst(cc, retObj);
-				s->insertAfter(cc);
+				returnStore = new StoreInst(cc, retObj);
+				returnStore->insertAfter(cc);
+				convertedReturn = cc == c ? nullptr : cc;
 			}
+			_splitBranchCalls.push_back({c, returnStore, convertedReturn});
 
 			ReturnInst::Create(
 					br->getModule()->getContext(),
@@ -632,6 +676,106 @@ llvm::Function* Decoder::splitFunctionOn(
 	}
 
 	return ret;
+}
+
+/**
+ * A branch into code already owned by another decoded function is represented
+ * temporarily as a function call because LLVM basic blocks cannot belong to
+ * two functions.  When two or more entry functions share such a tail, keeping
+ * that artificial call loses the live register and stack state at the branch
+ * boundary.  Inline only the branch-originated calls to the shared tail.  True
+ * machine CALL users, if any, remain ordinary calls.
+ */
+void Decoder::inlineSharedTailBranches()
+{
+	std::map<Function*, std::set<Function*>> tailCallers;
+	for (const auto& split : _splitBranchCalls)
+	{
+		if (split.call != nullptr && split.call->getParent() != nullptr)
+		{
+			tailCallers[split.call->getCalledFunction()].insert(
+					split.call->getFunction());
+		}
+	}
+
+	std::set<Function*> inlinedTails;
+	AssumptionCacheTracker assumptions;
+	for (const auto& split : _splitBranchCalls)
+	{
+		auto* call = split.call;
+		if (call == nullptr || call->getParent() == nullptr)
+		{
+			continue;
+		}
+		auto* callee = call->getCalledFunction();
+		if (callee == nullptr || tailCallers[callee].size() < 2)
+		{
+			continue;
+		}
+
+		std::map<uint64_t, cs_insn*> addressToCapstone;
+		for (auto& block : *callee)
+		for (auto& instruction : block)
+		{
+			if (!AsmInstruction::isLlvmToAsmInstruction(&instruction))
+			{
+				continue;
+			}
+			AsmInstruction assembly(&instruction);
+			if (auto* capstone = assembly.getCapstoneInsn())
+			{
+				addressToCapstone[assembly.getAddress()] = capstone;
+			}
+		}
+
+		auto* caller = call->getFunction();
+		InlineFunctionInfo info(nullptr, &assumptions);
+		if (!InlineFunction(call, info))
+		{
+			continue;
+		}
+
+		if (split.returnStore != nullptr)
+		{
+			split.returnStore->eraseFromParent();
+		}
+		if (split.convertedReturn != nullptr
+				&& split.convertedReturn->use_empty())
+		{
+			split.convertedReturn->eraseFromParent();
+		}
+
+		// LLVM's inliner clones the assembly-marker stores, while RetDec's
+		// Capstone side table is instruction-keyed.  Reassociate the clones by
+		// their exact decoded address for downstream stack/call analysis.
+		for (auto& block : *caller)
+		for (auto& instruction : block)
+		{
+			if (!AsmInstruction::isLlvmToAsmInstruction(&instruction)
+					|| _llvm2capstone->count(cast<StoreInst>(&instruction)) != 0)
+			{
+				continue;
+			}
+			AsmInstruction assembly(&instruction);
+			auto found = addressToCapstone.find(assembly.getAddress());
+			if (found != addressToCapstone.end())
+			{
+				_llvm2capstone->emplace(
+						cast<StoreInst>(&instruction),
+						cloneCapstoneInstruction(found->second));
+			}
+		}
+		inlinedTails.insert(callee);
+	}
+
+	_splitBranchCalls.clear();
+	for (auto* function : inlinedTails)
+	{
+		if (function->use_empty())
+		{
+			function->setLinkage(GlobalValue::InternalLinkage);
+		}
+	}
 }
 
 } // namespace bin2llvmir
