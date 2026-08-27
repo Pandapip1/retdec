@@ -1041,6 +1041,112 @@ TEST_F(ParamReturnTests, x86AssemblyCleanupBoundsArgumentsAfterStackRestoreFoldi
 	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(2));
 }
 
+TEST_F(ParamReturnTests, x86ConsecutivePopCleanupPreservesEveryPushedArgument)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		define i32 @consume() {
+			%first = alloca i32
+			%second = alloca i32
+			%a = load i32, i32* %first
+			%b = load i32, i32* %second
+			%sum = add i32 %a, %b
+			ret i32 %sum
+		}
+		define void @caller() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 22, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 11, i32* %slot2
+			store i32 %sp2, i32* @esp
+			store volatile i64 100, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 200, i64* @llvm2asm
+			%pop1 = load i32, i32* @esp
+			%after_pop1 = add i32 %pop1, 4
+			store i32 %after_pop1, i32* @esp
+			store volatile i64 300, i64* @llvm2asm
+			%pop2 = load i32, i32* @esp
+			%after_pop2 = add i32 %pop2, 4
+			store i32 %after_pop2, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"locals" : [
+					{
+						"name" : "first",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "second",
+						"storage" : { "type" : "stack", "value" : 8 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+	cs_insn firstPopInstruction = {};
+	firstPopInstruction.id = X86_INS_POP;
+	cs_insn secondPopInstruction = {};
+	secondPopInstruction.id = X86_INS_POP;
+	for (auto pair : std::vector<std::pair<uint64_t, cs_insn*>>{
+			{200, &firstPopInstruction}, {300, &secondPopInstruction}})
+	{
+		auto popAsm = AsmInstruction(module.get(), pair.first);
+		ASSERT_TRUE(popAsm.isValid());
+		AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+				popAsm.getLlvmToAsmInstruction()] = pair.second;
+	}
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(11));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->equalsInt(22));
+}
+
 TEST_F(ParamReturnTests, x86PtrCallUnpairedDynamicStoreIsNotAnArgument)
 {
 	parseInput(R"(

@@ -1098,8 +1098,57 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	unsigned cleanupBytes = 0;
 	if (_config->getConfig().architecture.isX86())
 	{
-		for (auto* next = call->getNextNode(); next != nullptr;
-				next = next->getNextNode())
+		// Prefer the machine cleanup sequence.  Optimized 32-bit MSVC code often
+		// emits one POP ECX per cdecl argument instead of ADD ESP, imm.  Looking at
+		// the first reconstructed ESP += 4 alone truncates a multi-argument call to
+		// one argument.  Consecutive native POPs are one cleanup sequence and each
+		// consumes one machine stack slot.
+		auto cleanupAsm = AsmInstruction(call).getNext();
+		while (cleanupAsm.isValid())
+		{
+			auto* instruction = cleanupAsm.getCapstoneInsn();
+			if (instruction == nullptr)
+			{
+				break;
+			}
+			if (instruction->id == X86_INS_POP)
+			{
+				unsigned slotSize =
+						_config->getConfig().architecture.getByteSize();
+				if (slotSize == 0
+						|| slotSize > std::numeric_limits<unsigned>::max()
+								- cleanupBytes)
+				{
+					break;
+				}
+				cleanupBytes += slotSize;
+				cleanupAsm = cleanupAsm.getNext();
+				continue;
+			}
+			if (instruction->id == X86_INS_ADD && instruction->detail != nullptr)
+			{
+				auto& x86 = instruction->detail->x86;
+				if (x86.op_count == 2
+						&& x86.operands[0].type == X86_OP_REG
+						&& (x86.operands[0].reg == X86_REG_SP
+								|| x86.operands[0].reg == X86_REG_ESP
+								|| x86.operands[0].reg == X86_REG_RSP)
+						&& x86.operands[1].type == X86_OP_IMM
+						&& x86.operands[1].imm > 0
+						&& static_cast<uint64_t>(x86.operands[1].imm)
+								<= std::numeric_limits<unsigned>::max() - cleanupBytes)
+				{
+					cleanupBytes += static_cast<unsigned>(x86.operands[1].imm);
+				}
+			}
+			break;
+		}
+
+		// If native instruction metadata is unavailable, recover a conventional
+		// LLVM ESP restoration.  This fallback is intentionally only used when the
+		// complete machine sequence above supplied no bound.
+		for (auto* next = cleanupBytes == 0 ? call->getNextNode() : nullptr;
+				next != nullptr; next = next->getNextNode())
 		{
 			if (auto* nextCall = dyn_cast<CallInst>(next))
 			{
@@ -1142,33 +1191,6 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				break;
 			}
 		}
-		// Stack analysis may replace the restored ESP value with a pointer to
-		// the recovered frame, leaving the original add dead.  In that case the
-		// machine instruction remains the authoritative cleanup-size source.
-		if (cleanupBytes == 0)
-		{
-			auto nextAsm = AsmInstruction(call).getNext();
-			auto* instruction = nextAsm.isValid()
-					? nextAsm.getCapstoneInsn() : nullptr;
-			if (instruction != nullptr && instruction->id == X86_INS_ADD
-					&& instruction->detail != nullptr)
-			{
-				auto& x86 = instruction->detail->x86;
-				if (x86.op_count == 2
-						&& x86.operands[0].type == X86_OP_REG
-						&& (x86.operands[0].reg == X86_REG_SP
-								|| x86.operands[0].reg == X86_REG_ESP
-								|| x86.operands[0].reg == X86_REG_RSP)
-						&& x86.operands[1].type == X86_OP_IMM
-						&& x86.operands[1].imm > 0
-						&& static_cast<uint64_t>(x86.operands[1].imm)
-								<= std::numeric_limits<unsigned>::max())
-				{
-					cleanupBytes = static_cast<unsigned>(
-							x86.operands[1].imm);
-				}
-			}
-		}
 	}
 	auto* b = call->getParent();
 	Instruction* prev = call;
@@ -1199,9 +1221,9 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 			break;
 		}
 
-		if (auto* call = dyn_cast<CallInst>(prev))
+		if (auto* previousCall = dyn_cast<CallInst>(prev))
 		{
-			auto* calledFnc = call->getCalledFunction();
+			auto* calledFnc = previousCall->getCalledFunction();
 			if (calledFnc == nullptr || !calledFnc->isIntrinsic())
 			{
 				break;
