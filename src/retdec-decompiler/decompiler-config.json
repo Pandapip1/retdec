@@ -50,6 +50,7 @@
             "retdec-stack",
             "retdec-constants",
             "retdec-param-return",
+            "stack-frame",
             "retdec-inst-opt-rda",
             "retdec-inst-opt",
             "retdec-simple-types",
