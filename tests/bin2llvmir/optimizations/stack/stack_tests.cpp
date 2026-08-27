@@ -43,15 +43,15 @@ TEST_F(StackAnalysisTests, reconstructsIndexedFrameRelativeStackObject)
 	)");
 
 	auto config = Config::empty(module.get());
-	config.getConfig().registers.insert(retdec::config::Object(
-			"ebp", retdec::config::Storage::inRegister("ebp")));
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-192", retdec::config::Storage::onStack(-192)));
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-156", retdec::config::Storage::onStack(-156)));
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-4", retdec::config::Storage::onStack(-4)));
+	config.getConfig().registers.insert(retdec::common::Object(
+			"ebp", retdec::common::Storage::inRegister("ebp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-192", retdec::common::Storage::onStack(-192)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-156", retdec::common::Storage::onStack(-156)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-4", retdec::common::Storage::onStack(-4)));
 	config.getConfig().functions.insert(function);
 	auto* abi = AbiProvider::addAbi(module.get(), &config);
 
@@ -89,13 +89,13 @@ TEST_F(StackAnalysisTests, preservesOverlappingQwordAndDwordAccessWidths)
 	)");
 
 	auto config = Config::empty(module.get());
-	config.getConfig().registers.insert(retdec::config::Object(
-			"ebp", retdec::config::Storage::inRegister("ebp")));
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-12", retdec::config::Storage::onStack(-12)));
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-4", retdec::config::Storage::onStack(-4)));
+	config.getConfig().registers.insert(retdec::common::Object(
+			"ebp", retdec::common::Storage::inRegister("ebp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-12", retdec::common::Storage::onStack(-12)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-4", retdec::common::Storage::onStack(-4)));
 	config.getConfig().functions.insert(function);
 	auto* abi = AbiProvider::addAbi(module.get(), &config);
 
@@ -149,14 +149,14 @@ TEST_F(StackAnalysisTests, reconstructsTwoObjectsWithoutReplacingSharedFrameBase
 	)");
 
 	auto config = Config::empty(module.get());
-	config.getConfig().registers.insert(retdec::config::Object(
-			"ebp", retdec::config::Storage::inRegister("ebp")));
-	auto function = retdec::config::Function("func");
+	config.getConfig().registers.insert(retdec::common::Object(
+			"ebp", retdec::common::Storage::inRegister("ebp")));
+	auto function = retdec::common::Function("func");
 	for (int offset : {-400, -380, -192, -156, -4})
 	{
 		std::string name = "stack_var_" + std::to_string(offset);
-		function.locals.insert(retdec::config::Object(
-				name, retdec::config::Storage::onStack(offset)));
+		function.locals.insert(retdec::common::Object(
+				name, retdec::common::Storage::onStack(offset)));
 	}
 	config.getConfig().functions.insert(function);
 	auto* abi = AbiProvider::addAbi(module.get(), &config);
@@ -193,12 +193,12 @@ TEST_F(StackAnalysisTests, coalescesIndexedAndFixedStackObjectViews)
 	)");
 
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("func");
+	auto function = retdec::common::Function("func");
 	for (int offset : {-776, -772, -768, -548})
 	{
 		std::string name = "stack_var_" + std::to_string(offset);
-		function.locals.insert(retdec::config::Object(
-				name, retdec::config::Storage::onStack(offset)));
+		function.locals.insert(retdec::common::Object(
+				name, retdec::common::Storage::onStack(offset)));
 	}
 	config.getConfig().functions.insert(function);
 	auto* abi = AbiProvider::addAbi(module.get(), &config);
@@ -253,12 +253,12 @@ TEST_F(StackAnalysisTests, restoresConfiguredWidthBeforeCoalescingAdjacentObject
 	)");
 
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("func");
+	auto function = retdec::common::Function("func");
 	for (int offset : {-32, -28})
 	{
 		std::string name = "stack_var_" + std::to_string(offset);
-		retdec::config::Object object(
-				name, retdec::config::Storage::onStack(offset));
+		retdec::common::Object object(
+				name, retdec::common::Storage::onStack(offset));
 		object.type.setLlvmIr("i32*");
 		function.locals.insert(object);
 	}
@@ -314,11 +314,11 @@ TEST_F(StackAnalysisTests, coalescesOverlappingLocalViewsWithoutDynamicFrameTag)
 	)");
 
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"whole", retdec::config::Storage::onStack(-16)));
-	function.locals.insert(retdec::config::Object(
-			"byte_view", retdec::config::Storage::onStack(-13)));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"whole", retdec::common::Storage::onStack(-16)));
+	function.locals.insert(retdec::common::Object(
+			"byte_view", retdec::common::Storage::onStack(-13)));
 	config.getConfig().functions.insert(function);
 
 	StackFrameCoalescing lowerFrame;
@@ -355,11 +355,11 @@ TEST_F(StackAnalysisTests, coalescesDisjointViewsOfAddressEscapedStackOutput)
 	)");
 
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"output_start", retdec::config::Storage::onStack(-24)));
-	function.locals.insert(retdec::config::Object(
-			"output_member", retdec::config::Storage::onStack(-18)));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"output_start", retdec::common::Storage::onStack(-24)));
+	function.locals.insert(retdec::common::Object(
+			"output_member", retdec::common::Storage::onStack(-18)));
 	config.getConfig().functions.insert(function);
 
 	StackFrameCoalescing lowerFrame;
@@ -407,9 +407,9 @@ TEST_F(StackAnalysisTests, reservesNativeLocalFrameForEscapedScalarAnchor)
 	)");
 
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-84", retdec::config::Storage::onStack(-84)));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-84", retdec::common::Storage::onStack(-84)));
 	config.getConfig().functions.insert(function);
 
 	StackFrameCoalescing lowerFrame;
@@ -450,15 +450,15 @@ TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)
 	)");
 
 	auto config = Config::empty(module.get());
-	config.getConfig().registers.insert(retdec::config::Object(
-			"ebp", retdec::config::Storage::inRegister("ebp")));
-	auto function = retdec::config::Function("func");
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-192", retdec::config::Storage::onStack(-192)));
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-156", retdec::config::Storage::onStack(-156)));
-	function.locals.insert(retdec::config::Object(
-			"stack_var_-4", retdec::config::Storage::onStack(-4)));
+	config.getConfig().registers.insert(retdec::common::Object(
+			"ebp", retdec::common::Storage::inRegister("ebp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-192", retdec::common::Storage::onStack(-192)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-156", retdec::common::Storage::onStack(-156)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-4", retdec::common::Storage::onStack(-4)));
 	config.getConfig().functions.insert(function);
 	auto* abi = AbiProvider::addAbi(module.get(), &config);
 
