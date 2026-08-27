@@ -222,6 +222,49 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoLocalizedRegisterAtReturn)
 	EXPECT_EQ(module->getGlobalVariable("esi"), restored->getPointerOperand());
 }
 
+TEST_F(StackPointerOpsRemoveTests,
+		removesLaterRegisterRestorePopWithAccumulatedStackDisplacement)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@edi = global i32 0
+		@esi = global i32 0
+		define i32 @func() {
+			%stack_pointer_0 = load i32, i32* @esp
+			%stack_address_0 = inttoptr i32 %stack_pointer_0 to i32*
+			%popped_edi = load i32, i32* %stack_address_0
+			store i32 %popped_edi, i32* @edi
+			%stack_pointer_1 = load i32, i32* @esp
+			%later_address = add i32 %stack_pointer_1, 4
+			%stack_address_1 = inttoptr i32 %later_address to i32*
+			%popped_esi = load i32, i32* %stack_address_1
+			store i32 %popped_esi, i32* @esi
+			ret i32 7
+		}
+	)");
+	auto c = Config::empty(module.get());
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+	abi.addRegister(X86_REG_EDI, getGlobalByName("edi"));
+	abi.addRegister(X86_REG_ESI, getGlobalByName("esi"));
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
+	bool loadsSyntheticStackPointer = false;
+	bool hasLaterAddress = false;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		hasLaterAddress |= instruction.getName() == "later_address";
+		if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+		{
+			loadsSyntheticStackPointer |=
+					load->getPointerOperand() == module->getGlobalVariable("esp");
+		}
+	}
+	EXPECT_FALSE(loadsSyntheticStackPointer);
+	EXPECT_FALSE(hasLaterAddress);
+}
+
 TEST_F(StackPointerOpsRemoveTests, keepsPopValueThatRemainsSemanticallyUsed)
 {
 	parseInput(R"(

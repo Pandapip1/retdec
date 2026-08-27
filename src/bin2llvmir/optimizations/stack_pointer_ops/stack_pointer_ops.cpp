@@ -94,6 +94,40 @@ bool isRegisterLocalizationAlloca(AllocaInst* alloca, Abi* abi)
 	return false;
 }
 
+LoadInst* getStackPointerLoadFromPopAddress(Value* value, Abi* abi)
+{
+	value = llvm_utils::skipCasts(value);
+	if (auto* load = dyn_cast<LoadInst>(value))
+	{
+		return abi->isStackPointerRegister(load->getPointerOperand())
+				? load
+				: nullptr;
+	}
+
+	auto* operation = dyn_cast<BinaryOperator>(value);
+	if (operation == nullptr
+			|| (operation->getOpcode() != Instruction::Add
+					&& operation->getOpcode() != Instruction::Sub))
+	{
+		return nullptr;
+	}
+
+	// A sequence of decoded POPs may leave later restore loads addressed as
+	// ESP plus the bytes consumed by preceding POPs after the synthetic ESP
+	// stores have been removed.  Accept only constant displacement arithmetic
+	// so unrelated values derived from ESP remain semantic.
+	if (isa<ConstantInt>(operation->getOperand(1)))
+	{
+		return getStackPointerLoadFromPopAddress(operation->getOperand(0), abi);
+	}
+	if (operation->getOpcode() == Instruction::Add
+			&& isa<ConstantInt>(operation->getOperand(0)))
+	{
+		return getStackPointerLoadFromPopAddress(operation->getOperand(1), abi);
+	}
+	return nullptr;
+}
+
 struct StackAddressRange
 {
 	int64_t minimum;
@@ -632,10 +666,9 @@ bool StackPointerOpsRemove::removeDeadRegisterRestorePops()
 			auto* address = dyn_cast<IntToPtrInst>(popped->getPointerOperand());
 			auto* stackPointer = address == nullptr
 					? nullptr
-					: dyn_cast<LoadInst>(address->getOperand(0));
-			if (stackPointer == nullptr
-					|| !_abi->isStackPointerRegister(
-							stackPointer->getPointerOperand()))
+					: getStackPointerLoadFromPopAddress(
+							address->getOperand(0), _abi);
+			if (stackPointer == nullptr)
 			{
 				continue;
 			}
