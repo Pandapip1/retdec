@@ -9,6 +9,7 @@ add_executable(tests-bin2llvmir
 	optimizations/inst_opt/inst_opt_tests.cpp
 	optimizations/main_detection/main_detection_tests.cpp
 	optimizations/param_return/param_return_tests.cpp
+	optimizations/pe32_pointer/pe32_pointer_tests.cpp
 	optimizations/register_localization/register_localization_tests.cpp
 	optimizations/simple_types/simple_types_tests.cpp
 	optimizations/stack/stack_tests.cpp

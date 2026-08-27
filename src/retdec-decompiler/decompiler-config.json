@@ -168,6 +168,7 @@
             "retdec-inst-opt",
             "retdec-simple-types",
             "retdec-stack-ptr-op-remove",
+            "retdec-pe32-pointer-cells",
             "retdec-idioms",
             "instcombine",
             "retdec-inst-opt",
