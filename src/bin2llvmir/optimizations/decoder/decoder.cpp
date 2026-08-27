@@ -572,6 +572,14 @@ bool Decoder::getJumpTargetsFromInstruction(
 				return true;
 			}
 		}
+		else
+		{
+			// A computed call is still an observable control-flow operation even
+			// when symbolic target recovery cannot resolve it to one address.
+			// Keep it as an indirect LLVM call; otherwise finalizePseudoCalls()
+			// removes the pseudo call and silently drops the callback entirely.
+			transformToIndirectCall(pCall, pCall->getArgOperand(0));
+		}
 	}
 	// Return -> break flow, do not try to compute target.
 	//

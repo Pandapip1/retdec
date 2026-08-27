@@ -38,8 +38,14 @@
 namespace retdec {
 namespace bin2llvmir {
 
+namespace tests {
+class DecoderTests;
+}
+
 class Decoder : public llvm::ModulePass
 {
+	friend class tests::DecoderTests;
+
 	public:
 		static char ID;
 		Decoder();
@@ -246,6 +252,9 @@ class Decoder : public llvm::ModulePass
 		llvm::CallInst* transformToCall(
 				llvm::CallInst* pseudo,
 				llvm::Function* callee);
+		llvm::CallInst* transformToIndirectCall(
+				llvm::CallInst* pseudo,
+				llvm::Value* callee);
 		llvm::CallInst* transformToCondCall(
 				llvm::CallInst* pseudo,
 				llvm::Value* cond,
