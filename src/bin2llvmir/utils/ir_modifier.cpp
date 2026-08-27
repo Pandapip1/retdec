@@ -871,6 +871,19 @@ llvm::Value* IrModifier::changeObjectType(
 
 			if (val == dst)
 			{
+				// A decoded memory access carries an exact machine width.  Type
+				// recovery may infer a wider type for a global from another use,
+				// but widening this store would also write adjacent binary globals.
+				// Keep the original access type and only cast the new declaration's
+				// address.  Local allocas are allowed to follow the recovered type;
+				// unlike binary globals they do not have a fixed neighbouring layout.
+				if (isa<GlobalVariable>(val))
+				{
+					auto* conv = IrModifier::convertValueToType(
+							nval, origType, store);
+					store->setOperand(1, conv);
+					continue;
+				}
 				PointerType* ptr = dyn_cast<PointerType>(nval->getType());
 				assert(ptr);
 				auto* conv = IrModifier::convertValueToType(src, ptr->getElementType(), store);
@@ -887,7 +900,12 @@ llvm::Value* IrModifier::changeObjectType(
 		{
 			assert(val == load->getPointerOperand());
 
-			auto* newLoad = new LoadInst(nval);
+			// See the store case above: preserve the width of decoded reads from
+			// fixed-layout binary globals even if their declaration is retyped.
+			auto* pointer = isa<GlobalVariable>(val)
+					? IrModifier::convertValueToType(nval, origType, load)
+					: nval;
+			auto* newLoad = new LoadInst(pointer);
 			newLoad->insertBefore(load);
 
 			// load->getType() stays unchanged even after loaded object's type is mutated.
