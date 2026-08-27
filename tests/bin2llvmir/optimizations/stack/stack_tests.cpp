@@ -280,6 +280,57 @@ TEST_F(StackAnalysisTests, coalescesOverlappingLocalViewsWithoutDynamicFrameTag)
 			"retdec.stack.frame"));
 }
 
+TEST_F(StackAnalysisTests, coalescesDisjointViewsOfAddressEscapedStackOutput)
+{
+	parseInput(R"(
+		declare void @write_output(i32*)
+		define i8 @func() {
+			%output_start = alloca i32
+			%output_member = alloca i8
+			call void @write_output(i32* %output_start)
+			%member = load i8, i8* %output_member
+			ret i8 %member
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("func");
+	function.locals.insert(retdec::config::Object(
+			"output_start", retdec::config::Storage::onStack(-24)));
+	function.locals.insert(retdec::config::Object(
+			"output_member", retdec::config::Storage::onStack(-18)));
+	config.getConfig().functions.insert(function);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
+	EXPECT_EQ(7u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	auto* start = getValueByName("output_start.frame");
+	auto* member = getValueByName("output_member.frame.addr");
+	ASSERT_NE(nullptr, start);
+	ASSERT_NE(nullptr, member);
+	EXPECT_EQ(-24, config.getStackVariableOffset(start).getValue());
+	EXPECT_EQ(-18, config.getStackVariableOffset(member).getValue());
+	CallInst* outputCall = nullptr;
+	LoadInst* memberLoad = nullptr;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			outputCall = call;
+		}
+		else if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			memberLoad = load;
+		}
+	}
+	ASSERT_NE(nullptr, outputCall);
+	ASSERT_NE(nullptr, memberLoad);
+	EXPECT_EQ(start, outputCall->getArgOperand(0));
+	EXPECT_EQ(member, memberLoad->getPointerOperand());
+}
+
 TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)
 {
 	parseInput(R"(
