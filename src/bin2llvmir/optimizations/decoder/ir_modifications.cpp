@@ -690,23 +690,15 @@ llvm::Function* Decoder::splitFunctionOn(
 /**
  * A branch into code already owned by another decoded function is represented
  * temporarily as a function call because LLVM basic blocks cannot belong to
- * two functions.  When two or more entry functions share such a tail, keeping
- * that artificial call loses the live register and stack state at the branch
- * boundary.  Inline only the branch-originated calls to the shared tail.  True
- * machine CALL users, if any, remain ordinary calls.
+ * two functions.  Keeping that artificial call loses the live register and
+ * stack state at the branch boundary.  It also gives a conditional tail jump
+ * ordinary call semantics: the callee's RET would continue through the
+ * non-taken fallthrough block instead of returning from the current function.
+ * Inline every branch-originated call and make its continuation a return.
+ * True machine CALL users, if any, remain ordinary calls.
  */
 void Decoder::inlineSharedTailBranches()
 {
-	std::map<Function*, std::set<Function*>> tailCallers;
-	for (const auto& split : _splitBranchCalls)
-	{
-		if (split.call != nullptr && split.call->getParent() != nullptr)
-		{
-			tailCallers[split.call->getCalledFunction()].insert(
-					split.call->getFunction());
-		}
-	}
-
 	std::set<Function*> inlinedTails;
 	AssumptionCacheTracker assumptions;
 	for (const auto& split : _splitBranchCalls)
@@ -717,7 +709,7 @@ void Decoder::inlineSharedTailBranches()
 			continue;
 		}
 		auto* callee = call->getCalledFunction();
-		if (callee == nullptr || tailCallers[callee].size() < 2)
+		if (callee == nullptr)
 		{
 			continue;
 		}
@@ -738,6 +730,12 @@ void Decoder::inlineSharedTailBranches()
 		}
 
 		auto* caller = call->getFunction();
+		auto* terminator = call->getParent()->getTerminator();
+		ReturnInst::Create(
+				_module->getContext(),
+				UndefValue::get(caller->getReturnType()),
+				terminator);
+		terminator->eraseFromParent();
 		InlineFunctionInfo info(nullptr, &assumptions);
 		if (!InlineFunction(call, info))
 		{
