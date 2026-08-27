@@ -2843,6 +2843,58 @@ TEST_F(GlobalToLocalTests, externalCall01)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(GlobalToLocalTests, localizedRegisterPreservesIncomingValue)
+{
+	parseInput(R"(
+		@fpu_top = internal global i3 0
+
+		define i3 @readThenUpdate() {
+		entry:
+		  %incoming = load i3, i3* @fpu_top
+		  %updated = add i3 %incoming, 1
+		  store i3 %updated, i3* @fpu_top
+		  ret i3 %incoming
+		}
+	)");
+	ConfigProvider::clear();
+	ConfigProvider::addConfigJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "fpu_top",
+				"storage" : {
+					"type" : "register",
+					"value" : "fpu_top",
+					"registerClass" : "fpu",
+					"registerNumber" : 0
+				}
+			}
+		]
+	})");
+
+	runOnModule();
+
+	std::string exp = R"(
+		@fpu_top = internal global i3 0
+
+		define i3 @readThenUpdate() {
+		entry:
+		  %fpu_top.global-to-local = alloca i3
+		  %0 = load i3, i3* @fpu_top
+		  store i3 %0, i3* %fpu_top.global-to-local
+		  %incoming = load i3, i3* %fpu_top.global-to-local
+		  %updated = add i3 %incoming, 1
+		  store i3 %updated, i3* %fpu_top.global-to-local
+		  ret i3 %incoming
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec

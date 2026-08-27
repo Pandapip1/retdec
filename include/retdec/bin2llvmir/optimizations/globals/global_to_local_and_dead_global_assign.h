@@ -107,6 +107,9 @@ private:
 		/// Mapping of a global variable name to a local variable.
 		StringAllocaInstMap convertedGlobsToLoc;
 
+		/// Entry loads which seed localized architectural registers.
+		std::set<llvm::Instruction*> incomingRegisterLoads;
+
 		/// Analysis for store and load instructions.
 		StoreLoadAnalysis &storeLoadAnalysis;
 

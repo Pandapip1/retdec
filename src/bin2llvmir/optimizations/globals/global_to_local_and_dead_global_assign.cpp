@@ -993,9 +993,23 @@ llvm::Instruction *GlobalToLocalAndDeadGlobalAssign::FuncInfo::getFirstNonAlloca
 void GlobalToLocalAndDeadGlobalAssign::FuncInfo::convertGlobToLocUseInOneFunc(
 		GlobalVariable &glob) {
 	Value *globVal(glob.getValueName()->second);
+	// Need to save it into set because replacing uses while iterating through
+	// these uses causes problems.  Collect them before getLocVarFor(), which
+	// may add a load preserving the incoming value of a register global.
+	std::set<llvm::Instruction*> toReplace;
+	for (auto i = glob.user_begin(), e = glob.user_end(); i != e; ++i) {
+		Instruction *inst(dyn_cast<Instruction>(*i));
+		assert(inst && "Not supported instruction.");
+		if (!hasItem(incomingRegisterLoads, inst)) {
+			toReplace.insert(inst);
+		}
+	}
+
 	Value *locVar(getLocVarFor(glob));
 	Instruction *nonAllocaInst(getFirstNonAllocaInst(func.getEntryBlock()));
-	if (storeLoadAnalysis.hasSomeRUseEffectOutOfFunc(glob, func)
+	auto* config = ConfigProvider::getConfig(func.getParent());
+	if (!(config && config->isRegister(&glob))
+			&& storeLoadAnalysis.hasSomeRUseEffectOutOfFunc(glob, func)
 			&& glob.hasInitializer()) {
 		// Creates assign of value to local variable only if it is needed.
 		// It is needed when we don't have in all places left uses before right
@@ -1006,15 +1020,6 @@ void GlobalToLocalAndDeadGlobalAssign::FuncInfo::convertGlobToLocUseInOneFunc(
 		} else {
 			storeInst->insertBefore(nonAllocaInst);
 		}
-	}
-
-	// Need to save it into set because replacing uses while iterating through
-	// these uses causes problems.
-	std::set<llvm::Instruction*> toReplace;
-	for (auto i = glob.user_begin(), e = glob.user_end(); i != e; ++i) {
-		Instruction *inst(dyn_cast<Instruction>(*i));
-		assert(inst && "Not supported instruction.");
-		toReplace.insert(inst);
 	}
 
 	// Replace all uses of this global variable in function.
@@ -1090,6 +1095,20 @@ Value *GlobalToLocalAndDeadGlobalAssign::FuncInfo::getLocVarFor(
 		newVarName,
 		globValue.getName()
 	);
+
+	// Register globals model incoming architectural state, not ordinary
+	// zero-initialized program globals.  A localized register may be read before
+	// its first write (notably x87 TOP and stack slots), so seed the local from
+	// the live global value.  Later scalar optimizations remove this copy when
+	// every path overwrites the register first.
+	auto* config = ConfigProvider::getConfig(func.getParent());
+	if (config && config->isRegister(&globValue)) {
+		Instruction *insertBefore(getFirstNonAllocaInst(func.getEntryBlock()));
+		assert(insertBefore && "function entry block must have a terminator");
+		auto* load = new LoadInst(&globValue, "", insertBefore);
+		incomingRegisterLoads.insert(load);
+		new StoreInst(load, allocaInst, insertBefore);
+	}
 	convertedGlobsToLoc[globValue.getName()] = allocaInst;
 	++CreatedLocVars;
 
