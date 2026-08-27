@@ -502,6 +502,38 @@ TEST_F(IrModifierTests, modifyFunctionWithZeroArguments)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(IrModifierTests, modifyFunctionAllowsSparseArgumentStorage)
+{
+	parseInput(R"(
+		define void @fnc() {
+			%first = alloca i32
+			%third = alloca i32
+			ret void
+		}
+	)");
+	auto* fnc = module->getFunction("fnc");
+	auto* first = cast<AllocaInst>(getValueByName("first"));
+	auto* third = cast<AllocaInst>(getValueByName("third"));
+	auto* i32 = Type::getInt32Ty(context);
+	auto config = Config::empty(module.get());
+	IrModifier modifier(module.get(), &config);
+	auto* changed = modifier.modifyFunction(
+			fnc,
+			Type::getVoidTy(context),
+			{i32, i32, i32},
+			false,
+			{},
+			{},
+			nullptr,
+			{first, nullptr, third}).first;
+
+	ASSERT_EQ(3u, changed->arg_size());
+	auto argument = changed->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	EXPECT_TRUE((argument++)->use_empty());
+	EXPECT_FALSE(argument->use_empty());
+}
+
 TEST_F(IrModifierTests, modifyFunctionWithExistingArguments)
 {
 	parseInput(R"(
