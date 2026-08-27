@@ -199,6 +199,28 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgePipelineIsOptInAndNormalizedAfterPointerCellLegalization)
+{
+	std::vector<std::string> passes{
+			"retdec-pe32-pointer-bridge",
+			"retdec-provider-init",
+			"retdec-pe32-pointer-cells",
+			"retdec-write-bc"};
+
+	ASSERT_TRUE(Pe32PointerBridge::enableInPipeline(passes));
+	std::vector<std::string> expected{
+			"retdec-provider-init",
+			"retdec-pe32-pointer-cells",
+			"retdec-pe32-pointer-bridge",
+			"retdec-write-bc"};
+	EXPECT_EQ(expected, passes);
+
+	std::vector<std::string> missingLegalization{"retdec-write-bc"};
+	EXPECT_FALSE(Pe32PointerBridge::enableInPipeline(missingLegalization));
+	EXPECT_EQ(1u, missingLegalization.size());
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		bridgeTranslatesNativeValuesAtFourByteGuestPointerCells)
 {
 	parseInput(R"(

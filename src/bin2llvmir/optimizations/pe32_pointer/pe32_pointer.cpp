@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <vector>
 
 #include <llvm/Analysis/ValueTracking.h>
@@ -43,6 +44,23 @@ Pe32PointerLegalization::Pe32PointerLegalization() :
 Pe32PointerBridge::Pe32PointerBridge() :
 		ModulePass(ID)
 {
+}
+
+bool Pe32PointerBridge::enableInPipeline(std::vector<std::string>& passes)
+{
+	passes.erase(
+			std::remove(
+					passes.begin(), passes.end(),
+					"retdec-pe32-pointer-bridge"),
+			passes.end());
+	auto legalization = std::find(
+			passes.begin(), passes.end(), "retdec-pe32-pointer-cells");
+	if (legalization == passes.end())
+	{
+		return false;
+	}
+	passes.insert(std::next(legalization), "retdec-pe32-pointer-bridge");
+	return true;
 }
 
 bool Pe32PointerLegalization::runOnModule(Module& module)

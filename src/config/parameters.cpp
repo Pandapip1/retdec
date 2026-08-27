@@ -57,6 +57,7 @@ const std::string JSON_backendNoTimeVaryingInfo = "backendNoTimeVaryingInfo";
 const std::string JSON_backendNoVarRenaming     = "backendNoVarRenaming";
 const std::string JSON_backendNoCompoundOperators = "backendNoCompoundOperators";
 const std::string JSON_backendNoSymbolicNames   = "backendNoSymbolicNames";
+const std::string JSON_pe32PointerBridge        = "pe32PointerBridge";
 
 const std::string JSON_timeout                  = "timeout";
 const std::string JSON_maxMemoryLimit           = "maxMemoryLimit";
@@ -149,6 +150,11 @@ bool Parameters::isBackendNoCompoundOperators() const
 bool Parameters::isBackendNoSymbolicNames() const
 {
 	return _backendNoSymbolicNames;
+}
+
+bool Parameters::isPe32PointerBridge() const
+{
+	return _pe32PointerBridge;
 }
 
 
@@ -328,6 +334,11 @@ void Parameters::setIsBackendNoCompoundOperators(bool b)
 void Parameters::setIsBackendNoSymbolicNames(bool b)
 {
 	_backendNoSymbolicNames = b;
+}
+
+void Parameters::setIsPe32PointerBridge(bool b)
+{
+	_pe32PointerBridge = b;
 }
 
 void Parameters::setIsDetectStaticCode(bool b)
@@ -513,6 +524,7 @@ void Parameters::serialize(Writer& writer) const
 	serdes::serializeBool(writer, JSON_backendNoVarRenaming, isBackendNoVarRenaming());
 	serdes::serializeBool(writer, JSON_backendNoCompoundOperators, isBackendNoCompoundOperators());
 	serdes::serializeBool(writer, JSON_backendNoSymbolicNames, isBackendNoSymbolicNames());
+	serdes::serializeBool(writer, JSON_pe32PointerBridge, isPe32PointerBridge());
 
 	serdes::serializeUint64(writer, JSON_timeout, getTimeout());
 	serdes::serializeUint64(writer, JSON_maxMemoryLimit, getMaxMemoryLimit());
@@ -581,6 +593,7 @@ void Parameters::deserialize(const rapidjson::Value& val)
 	setIsBackendNoVarRenaming( serdes::deserializeBool(val, JSON_backendNoVarRenaming, false) );
 	setIsBackendNoCompoundOperators( serdes::deserializeBool(val, JSON_backendNoCompoundOperators, false) );
 	setIsBackendNoSymbolicNames( serdes::deserializeBool(val, JSON_backendNoSymbolicNames, false) );
+	setIsPe32PointerBridge( serdes::deserializeBool(val, JSON_pe32PointerBridge, false) );
 
 	setTimeout( serdes::deserializeUint64(val, JSON_timeout, 0) );
 	setMaxMemoryLimit( serdes::deserializeUint64(val, JSON_maxMemoryLimit, 0) );

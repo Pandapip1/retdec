@@ -7,6 +7,9 @@
 #ifndef RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PE32_POINTER_PE32_POINTER_H
 #define RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PE32_POINTER_PE32_POINTER_H
 
+#include <string>
+#include <vector>
+
 #include <llvm/IR/Module.h>
 #include <llvm/Pass.h>
 
@@ -61,6 +64,7 @@ class Pe32PointerBridge : public llvm::ModulePass
 		Pe32PointerBridge();
 		bool runOnModule(llvm::Module& module) override;
 		bool runOnModuleCustom(llvm::Module& module, Config* config);
+		static bool enableInPipeline(std::vector<std::string>& passes);
 
 	private:
 		bool run();

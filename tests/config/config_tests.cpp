@@ -54,6 +54,17 @@ TEST_F(ConfigTests, FailedReadJsonStringKeepsAllConfigData)
 	EXPECT_EQ(expectedAbiPaths, config.parameters.abiPaths);
 }
 
+TEST_F(ConfigTests, Pe32PointerBridgeIsOptInAndRoundTripsThroughJson)
+{
+	EXPECT_FALSE(config.parameters.isPe32PointerBridge());
+	config.parameters.setIsPe32PointerBridge(true);
+
+	Config reparsed;
+	reparsed.readJsonString(config.generateJsonString());
+
+	EXPECT_TRUE(reparsed.parameters.isPe32PointerBridge());
+}
+
 TEST_F(ConfigTests, ClassesGetElementByIdReturnsNullPointerWhenThereIsNoSuchClass)
 {
 	ASSERT_EQ(config.classes.end(), config.classes.find("ClassName"));

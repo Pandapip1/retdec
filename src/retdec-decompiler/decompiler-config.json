@@ -18,6 +18,7 @@
         "backendNoVarRenaming": false,
         "backendNoCompoundOperators": false,
         "backendNoSymbolicNames": false,
+        "pe32PointerBridge": false,
         "timeout": 0,
         "maxMemoryLimit": 0,
         "maxMemoryLimitHalfRam": true,

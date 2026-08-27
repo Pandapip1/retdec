@@ -4,6 +4,8 @@
  * @copyright (c) 2019 Avast Software, licensed under the MIT license
  */
 
+#include <algorithm>
+
 #include <llvm/ADT/Triple.h>
 #include <llvm/Analysis/CallGraph.h>
 #include <llvm/Analysis/CallGraphSCCPass.h>
@@ -41,6 +43,7 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 
 #include "retdec/bin2llvmir/optimizations/decoder/decoder.h"
+#include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
 #include "retdec/bin2llvmir/optimizations/provider_init/provider_init.h"
 #include "retdec/bin2llvmir/providers/asm_instruction.h"
 #include "retdec/bin2llvmir/providers/config.h"
@@ -487,7 +490,20 @@ bool decompile(retdec::config::Config& config, std::string* outString)
 	TLII.disableAllFunctions();
 	pm.add(new TargetLibraryInfoWrapperPass(TLII));
 
-	for (auto& p : config.parameters.llvmPasses)
+	auto llvmPasses = config.parameters.llvmPasses;
+	const auto bridgePass = std::find(
+			llvmPasses.begin(), llvmPasses.end(),
+			"retdec-pe32-pointer-bridge");
+	if ((config.parameters.isPe32PointerBridge()
+			|| bridgePass != llvmPasses.end())
+			&& !bin2llvmir::Pe32PointerBridge::enableInPipeline(llvmPasses))
+	{
+		throw std::runtime_error(
+				"PE32 pointer bridge requires retdec-pe32-pointer-cells "
+				"in the LLVM pass pipeline");
+	}
+
+	for (auto& p : llvmPasses)
 	{
 		if (auto* info = passRegistry.getPassInfo(p))
 		{

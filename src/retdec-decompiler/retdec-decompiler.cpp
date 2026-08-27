@@ -392,6 +392,10 @@ void ProgramOptions::loadOption(std::list<std::string>::iterator& i)
 	{
 		params.setIsDetectStaticCode(false);
 	}
+	else if (isParam(i, "", "--pe32-pointer-bridge"))
+	{
+		params.setIsPe32PointerBridge(true);
+	}
 	else if (isParam(i, "", "--backend-disabled-opts"))
 	{
 		params.setBackendDisabledOpts(getParamOrDie(i));
@@ -625,6 +629,7 @@ General arguments:
 	[--cleanup] Removes temporary files created during the decompilation.
 	[--config] Specify JSON decompilation configuration file.
 	[--disable-static-code-detection] Prevents detection of statically linked code.
+	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked.
 Selective decompilation arguments:
 	[--select-ranges RANGES] Specify a comma separated list of ranges to decompile (example: 0x100-0x200,0x300-0x400,0x500-0x600).
 	[--select-functions FUNCS] Specify a comma separated list of functions to decompile (example: fnc1,fnc2,fnc3).
@@ -663,6 +668,9 @@ Decompilation process arguments:
 LLVM IR debug arguments:
 	[--print-after-all] Dump LLVM IR to stderr after every LLVM pass.
 	[--print-before-all] Dump LLVM IR to stderr before every LLVM pass.
+PE32 native-retarget runtime hook ABI:
+	uint32_t __retdec_pe32_host_to_guest(void *pointer, void *allocation_base, uint32_t allocation_size)
+	void *__retdec_pe32_guest_to_host(uint32_t guest_address)
 Other arguments:
 	[-h|--help] Show this help.
 	[--version] Show RetDec version.
