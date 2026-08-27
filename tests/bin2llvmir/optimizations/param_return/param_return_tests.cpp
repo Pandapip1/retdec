@@ -135,6 +135,7 @@ TEST_F(ParamReturnTests, x86PtrCallConsumesPairedPushValuesInNativeOrder)
 	})");
 	auto config = Config::fromConfig(module.get(), c);
 	auto abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
 	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
 	auto demangler = DemanglerProvider::addDemangler(
 		module.get(), &config, std::move(typeConfig));
@@ -194,6 +195,7 @@ TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 	})");
 	auto config = Config::fromConfig(module.get(), c);
 	auto abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
 	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
 	auto demangler = DemanglerProvider::addDemangler(
 		module.get(), &config, std::move(typeConfig));
