@@ -1123,6 +1123,112 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(2));
 }
 
+TEST_F(ParamReturnTests, x86CallerCleanupRecoversArgumentsAcrossNestedCalls)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare void @helper()
+		declare i32 @consume()
+		define void @fnc() {
+			%sp0 = load i32, i32* @esp
+			%outer5sp = sub i32 %sp0, 4
+			%outer5slot = inttoptr i32 %outer5sp to i32*
+			store i32 55, i32* %outer5slot
+			store i32 %outer5sp, i32* @esp
+
+			%helper1sp1 = sub i32 %outer5sp, 4
+			%helper1slot1 = inttoptr i32 %helper1sp1 to i32*
+			store i32 202, i32* %helper1slot1
+			store i32 %helper1sp1, i32* @esp
+			%helper1sp2 = sub i32 %helper1sp1, 4
+			%helper1slot2 = inttoptr i32 %helper1sp2 to i32*
+			store i32 201, i32* %helper1slot2
+			store i32 %helper1sp2, i32* @esp
+			call void @helper()
+			%helper1cleanup = load i32, i32* @esp
+			%helper1restored = add i32 %helper1cleanup, 8
+			store i32 %helper1restored, i32* @esp
+
+			%outer4sp = sub i32 %helper1restored, 4
+			%outer4slot = inttoptr i32 %outer4sp to i32*
+			store i32 44, i32* %outer4slot
+			store i32 %outer4sp, i32* @esp
+			%outer3sp = sub i32 %outer4sp, 4
+			%outer3slot = inttoptr i32 %outer3sp to i32*
+			store i32 33, i32* %outer3slot
+			store i32 %outer3sp, i32* @esp
+
+			%helper2sp1 = sub i32 %outer3sp, 4
+			%helper2slot1 = inttoptr i32 %helper2sp1 to i32*
+			store i32 402, i32* %helper2slot1
+			store i32 %helper2sp1, i32* @esp
+			%helper2sp2 = sub i32 %helper2sp1, 4
+			%helper2slot2 = inttoptr i32 %helper2sp2 to i32*
+			store i32 401, i32* %helper2slot2
+			store i32 %helper2sp2, i32* @esp
+			call void @helper()
+			%helper2cleanup = load i32, i32* @esp
+			%helper2restored = add i32 %helper2cleanup, 8
+			store i32 %helper2restored, i32* @esp
+
+			%outer2sp = sub i32 %helper2restored, 4
+			%outer2slot = inttoptr i32 %outer2sp to i32*
+			store i32 22, i32* %outer2slot
+			store i32 %outer2sp, i32* @esp
+			%outer1sp = sub i32 %outer2sp, 4
+			%outer1slot = inttoptr i32 %outer1sp to i32*
+			store i32 11, i32* %outer1slot
+			store i32 %outer1sp, i32* @esp
+			call i32 @consume()
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 20
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* helper = module->getFunction("helper");
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, helper);
+	ASSERT_NE(nullptr, consume);
+	EXPECT_EQ(2u, helper->arg_size());
+	EXPECT_EQ(5u, consume->arg_size());
+
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("fnc"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(5u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(11));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->equalsInt(22));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(33));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(3))->equalsInt(44));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(4))->equalsInt(55));
+}
+
 TEST_F(ParamReturnTests, x86AssemblyCleanupBoundsArgumentsAfterStackRestoreFolding)
 {
 	parseInput(R"(

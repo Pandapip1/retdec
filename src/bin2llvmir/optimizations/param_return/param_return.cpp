@@ -1095,15 +1095,20 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	NonIterableSet<Value*> disqualifiedValues;
 	unsigned maxUsedRegNum = 0;
 	Value* pendingStackPointer = nullptr;
-	unsigned cleanupBytes = 0;
-	if (_config->getConfig().architecture.isX86())
+	auto getX86CleanupBytes = [this](CallInst* cleanedCall) -> unsigned
 	{
+		if (!_config->getConfig().architecture.isX86())
+		{
+			return 0;
+		}
+
+		unsigned bytes = 0;
 		// Prefer the machine cleanup sequence.  Optimized 32-bit MSVC code often
 		// emits one POP ECX per cdecl argument instead of ADD ESP, imm.  Looking at
 		// the first reconstructed ESP += 4 alone truncates a multi-argument call to
 		// one argument.  Consecutive native POPs are one cleanup sequence and each
 		// consumes one machine stack slot.
-		auto cleanupAsm = AsmInstruction(call).getNext();
+		auto cleanupAsm = AsmInstruction(cleanedCall).getNext();
 		while (cleanupAsm.isValid())
 		{
 			auto* instruction = cleanupAsm.getCapstoneInsn();
@@ -1117,11 +1122,11 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 						_config->getConfig().architecture.getByteSize();
 				if (slotSize == 0
 						|| slotSize > std::numeric_limits<unsigned>::max()
-								- cleanupBytes)
+								- bytes)
 				{
 					break;
 				}
-				cleanupBytes += slotSize;
+				bytes += slotSize;
 				cleanupAsm = cleanupAsm.getNext();
 				continue;
 			}
@@ -1136,9 +1141,9 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 						&& x86.operands[1].type == X86_OP_IMM
 						&& x86.operands[1].imm > 0
 						&& static_cast<uint64_t>(x86.operands[1].imm)
-								<= std::numeric_limits<unsigned>::max() - cleanupBytes)
+								<= std::numeric_limits<unsigned>::max() - bytes)
 				{
-					cleanupBytes += static_cast<unsigned>(x86.operands[1].imm);
+					bytes += static_cast<unsigned>(x86.operands[1].imm);
 				}
 			}
 			break;
@@ -1147,7 +1152,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		// If native instruction metadata is unavailable, recover a conventional
 		// LLVM ESP restoration.  This fallback is intentionally only used when the
 		// complete machine sequence above supplied no bound.
-		for (auto* next = cleanupBytes == 0 ? call->getNextNode() : nullptr;
+		for (auto* next = bytes == 0 ? cleanedCall->getNextNode() : nullptr;
 				next != nullptr; next = next->getNextNode())
 		{
 			if (auto* nextCall = dyn_cast<CallInst>(next))
@@ -1182,16 +1187,24 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 						&& load != nullptr
 						&& load->getPointerOperand() == stackPointer)
 				{
-					cleanupBytes = amount->getZExtValue();
+					bytes = amount->getZExtValue();
 					break;
 				}
 			}
-			if (cleanupBytes != 0)
+			if (bytes != 0)
 			{
 				break;
 			}
 		}
-	}
+
+		return bytes;
+	};
+
+	unsigned cleanupBytes = getX86CleanupBytes(call);
+	unsigned nestedCleanupBytes = 0;
+	uint64_t recoveredStackBytes = 0;
+	unsigned x86SlotSize = _config->getConfig().architecture.isX86()
+			? _config->getConfig().architecture.getByteSize() : 0;
 	auto* b = call->getParent();
 	Instruction* prev = call;
 	std::set<BasicBlock*> seen;
@@ -1226,7 +1239,23 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 			auto* calledFnc = previousCall->getCalledFunction();
 			if (calledFnc == nullptr || !calledFnc->isIntrinsic())
 			{
-				break;
+				// An outer cdecl call may prepare one of its arguments by calling a
+				// helper, then resume pushing the remaining outer arguments.  Cross
+				// such a helper only when its own caller cleanup proves exactly how
+				// many intervening pushes belong to it.  Those pushes are skipped
+				// below; the outer scan remains bounded by its independent cleanup.
+				unsigned nestedBytes = getX86CleanupBytes(previousCall);
+				if (!_config->getConfig().architecture.isX86_32()
+						|| cleanupBytes == 0 || x86SlotSize == 0
+						|| nestedBytes == 0 || nestedBytes % x86SlotSize != 0
+						|| nestedBytes > std::numeric_limits<unsigned>::max()
+								- nestedCleanupBytes)
+				{
+					break;
+				}
+				nestedCleanupBytes += nestedBytes;
+				pendingStackPointer = nullptr;
+				continue;
 			}
 		}
 		else if (auto* store = dyn_cast<StoreInst>(prev))
@@ -1235,6 +1264,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 			auto* ptr = store->getPointerOperand();
 			bool isUnresolvedX86Push = false;
 			bool isUnresolvedX86StackBlock = false;
+			bool isDecodedX86Push = false;
 
 			// A decoded x86 push is represented by two stores:
 			//
@@ -1257,6 +1287,11 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 						llvm_utils::skipCasts(ptr) == pendingStackPointer;
 				pendingStackPointer = nullptr;
 			}
+			auto asmInstruction = AsmInstruction(store);
+			auto* capstone = asmInstruction.isValid()
+					? asmInstruction.getCapstoneInsn() : nullptr;
+			isDecodedX86Push = capstone != nullptr
+					&& capstone->id == X86_INS_PUSH;
 
 			// Compilers pass x87 values by reserving a block with SUB ESP and
 			// storing directly through the resulting current ESP.  There is no
@@ -1304,6 +1339,37 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 							|| isUnresolvedX86Push
 							|| isUnresolvedX86StackBlock))
 			{
+				uint64_t stackBytes = 0;
+				bool isStackArgument = _config->isStackVariable(ptr)
+						|| isUnresolvedX86Push || isUnresolvedX86StackBlock;
+				bool hasDecodedStackEffect = isDecodedX86Push
+						|| isUnresolvedX86Push || isUnresolvedX86StackBlock;
+				if (isStackArgument && hasDecodedStackEffect && x86SlotSize != 0)
+				{
+					uint64_t valueBytes = val->getType()->isSized()
+							? _module->getDataLayout().getTypeStoreSize(
+									val->getType()) : x86SlotSize;
+					stackBytes = isDecodedX86Push || isUnresolvedX86Push
+							? x86SlotSize
+							: std::max<uint64_t>(
+									x86SlotSize,
+									((valueBytes + x86SlotSize - 1) / x86SlotSize)
+											* x86SlotSize);
+				}
+
+				if (nestedCleanupBytes != 0)
+				{
+					if (stackBytes != 0)
+					{
+						if (stackBytes > nestedCleanupBytes)
+						{
+							break;
+						}
+						nestedCleanupBytes -= stackBytes;
+					}
+					continue;
+				}
+
 				ce.possibleArgStores.push_back(store);
 				if ((isUnresolvedX86Push || isUnresolvedX86StackBlock)
 						&& !_config->isStackVariable(ptr))
@@ -1320,6 +1386,16 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 					if (rn.isDefined() && rn > maxUsedRegNum)
 					{
 						maxUsedRegNum = rn;
+					}
+				}
+
+				if (stackBytes != 0)
+				{
+					recoveredStackBytes += stackBytes;
+					if (cleanupBytes != 0
+							&& recoveredStackBytes >= cleanupBytes)
+					{
+						break;
 					}
 				}
 			}
