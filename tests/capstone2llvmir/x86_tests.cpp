@@ -2553,6 +2553,27 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_IDIV_r32)
 	EXPECT_NO_VALUE_CALLED();
 }
 
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_IDIV_r32_negative_divisor)
+{
+	SKIP_MODE_16;
+
+	setRegisters({
+		{X86_REG_ECX, 0xfffffffd}, // -3
+		{X86_REG_EDX, 0},
+		{X86_REG_EAX, 100},
+	});
+
+	emulate("idiv ecx");
+
+	EXPECT_JUST_REGISTERS_LOADED({X86_REG_ECX, X86_REG_EDX, X86_REG_EAX});
+	EXPECT_JUST_REGISTERS_STORED({
+		{X86_REG_EDX, 1}, // remainder
+		{X86_REG_EAX, 0xffffffdf}, // quotient = -33
+	});
+	EXPECT_NO_MEMORY_LOADED_STORED();
+	EXPECT_NO_VALUE_CALLED();
+}
+
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_IDIV_r64)
 {
 	ONLY_MODE_64;

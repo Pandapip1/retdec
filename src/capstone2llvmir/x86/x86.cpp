@@ -2371,7 +2371,9 @@ void Capstone2LlvmIrTranslatorX86_impl::translateDiv(cs_insn* i, cs_x86* xi, llv
 		op0hl = irb.CreateShl(op0hl, resT->getBitWidth());
 		op0 = irb.CreateOr(op0hl, op0ll);
 	}
-	op1 = irb.CreateZExt(op1, op0->getType());
+	op1 = i->id == X86_INS_IDIV
+			? irb.CreateSExt(op1, op0->getType())
+			: irb.CreateZExt(op1, op0->getType());
 
 	auto* div = i->id == X86_INS_IDIV
 			? irb.CreateSDiv(op0, op1)  // X86_INS_IDIV - signed.
