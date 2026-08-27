@@ -1422,6 +1422,7 @@ void DataFlowEntry::applyToIrOrdinary()
 		}
 
 		std::map<llvm::CallInst*, std::vector<llvm::Value*>> calls2vals;
+		std::set<llvm::StoreInst*> recoveredPushStores;
 		for (auto& e : calls)
 		{
 			std::vector<Value*> loads;
@@ -1436,8 +1437,21 @@ void DataFlowEntry::applyToIrOrdinary()
 					fIt = specialArgStorage.find(loads.size());
 				}
 
-				auto* l = new LoadInst(s->getPointerOperand(), "", call);
-				loads.push_back(l);
+				if (e.unresolvedStackArgStores.count(s) != 0)
+				{
+					// The store is the decoded memory side of an x86 push whose
+					// loop-carried/current ESP address StackAnalysis could not turn
+					// into an alloca.  Its SSA value is the exact argument; loading
+					// it back through emulated ESP leaves native lifts dependent on
+					// an invalid synthetic stack address.
+					loads.push_back(s->getValueOperand());
+					recoveredPushStores.insert(s);
+				}
+				else
+				{
+					auto* l = new LoadInst(s->getPointerOperand(), "", call);
+					loads.push_back(l);
+				}
 			}
 
 			calls2vals[call] = loads;
@@ -1610,6 +1624,17 @@ void DataFlowEntry::applyToIrOrdinary()
 				argStores,
 				argNames).first;
 
+		// The recovered call now consumes each pushed SSA value directly.  Keep
+		// neither the synthetic memory write nor its potentially invalid ESP-based
+		// destination live in the retargeted program.
+		for (auto* store : recoveredPushStores)
+		{
+			if (store->getParent() != nullptr)
+			{
+				store->eraseFromParent();
+			}
+		}
+
 		LOG << "modify fnc: " << newFnc->getName().str() << " = "
 				<< llvmObjToString(oldType) << " -> "
 				<< llvmObjToString(newFnc->getType()) << std::endl;
@@ -1624,15 +1649,31 @@ void DataFlowEntry::applyToIrOrdinary()
 			LOG << "\tmodify call: " << llvmObjToString(call) << std::endl;
 
 			std::vector<Value*> loads;
+			std::vector<StoreInst*> recoveredPushStores;
 			for (auto* s : e.possibleArgStores)
 			{
-				auto* l = new LoadInst(s->getPointerOperand(), "", call);
-				loads.push_back(l);
-				LOG << "\t\t" << llvmObjToString(l) << std::endl;
+				if (e.unresolvedStackArgStores.count(s) != 0)
+				{
+					loads.push_back(s->getValueOperand());
+					recoveredPushStores.push_back(s);
+				}
+				else
+				{
+					auto* l = new LoadInst(s->getPointerOperand(), "", call);
+					loads.push_back(l);
+					LOG << "\t\t" << llvmObjToString(l) << std::endl;
+				}
 			}
 
 			auto* ret = fnc ? fnc->getReturnType() : call->getType();
 			IrModifier::modifyCallInst(call, ret, loads);
+			for (auto* store : recoveredPushStores)
+			{
+				if (store->getParent() != nullptr)
+				{
+					store->eraseFromParent();
+				}
+			}
 		}
 	}
 }

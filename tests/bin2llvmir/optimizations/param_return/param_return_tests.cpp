@@ -388,22 +388,16 @@ TEST_F(ParamReturnTests, x86PtrCallUnresolvedPushesAreUsedInArgumentOrder)
 			%sp0 = load i32, i32* @esp
 			%sp1 = sub i32 %sp0, 4
 			%slot1 = inttoptr i32 %sp1 to i32*
-			store i32 333, i32* %slot1
 			store i32 %sp1, i32* @esp
 			%sp2 = sub i32 %sp1, 4
 			%slot2 = inttoptr i32 %sp2 to i32*
-			store i32 222, i32* %slot2
 			store i32 %sp2, i32* @esp
 			%sp3 = sub i32 %sp2, 4
 			%slot3 = inttoptr i32 %sp3 to i32*
-			store i32 111, i32* %slot3
 			store i32 %sp3, i32* @esp
 			%a = bitcast i32* @r to void()*
-			%1 = load i32, i32* %slot3
-			%2 = load i32, i32* %slot2
-			%3 = load i32, i32* %slot1
-			%4 = bitcast void ()* %a to void (i32, i32, i32)*
-			call void %4(i32 %1, i32 %2, i32 %3)
+			%1 = bitcast void ()* %a to void (i32, i32, i32)*
+			call void %1(i32 111, i32 222, i32 333)
 			ret void
 		}
 	)";
@@ -450,10 +444,8 @@ TEST_F(ParamReturnTests, x86ExternalCallUnresolvedUnaryPushIsNotDropped)
 			%sp0 = load i32, i32* @esp
 			%sp1 = sub i32 %sp0, 4
 			%slot = inttoptr i32 %sp1 to i32*
-			store i32 123, i32* %slot
 			store i32 %sp1, i32* @esp
-			%1 = load i32, i32* %slot
-			call void @consume(i32 %1)
+			call void @consume(i32 123)
 			ret void
 		}
 	)";
@@ -531,12 +523,9 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 	}
 	ASSERT_NE(nullptr, recoveredCall);
 	ASSERT_EQ(3u, recoveredCall->getNumArgOperands());
-	EXPECT_EQ(getValueByName("slot3"), cast<LoadInst>(
-			recoveredCall->getArgOperand(0))->getPointerOperand());
-	EXPECT_EQ(getValueByName("slot2"), cast<LoadInst>(
-			recoveredCall->getArgOperand(1))->getPointerOperand());
-	EXPECT_EQ(getValueByName("slot1"), cast<LoadInst>(
-			recoveredCall->getArgOperand(2))->getPointerOperand());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(123));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->isZero());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(2));
 }
 
 TEST_F(ParamReturnTests, x86AssemblyCleanupBoundsArgumentsAfterStackRestoreFolding)
@@ -633,12 +622,9 @@ TEST_F(ParamReturnTests, x86AssemblyCleanupBoundsArgumentsAfterStackRestoreFoldi
 	}
 	ASSERT_NE(nullptr, recoveredCall);
 	ASSERT_EQ(3u, recoveredCall->getNumArgOperands());
-	EXPECT_EQ(getValueByName("slot3"), cast<LoadInst>(
-			recoveredCall->getArgOperand(0))->getPointerOperand());
-	EXPECT_EQ(getValueByName("slot2"), cast<LoadInst>(
-			recoveredCall->getArgOperand(1))->getPointerOperand());
-	EXPECT_EQ(getValueByName("slot1"), cast<LoadInst>(
-			recoveredCall->getArgOperand(2))->getPointerOperand());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(123));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->isZero());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(2));
 }
 
 TEST_F(ParamReturnTests, x86PtrCallUnpairedDynamicStoreIsNotAnArgument)
@@ -675,6 +661,68 @@ TEST_F(ParamReturnTests, x86PtrCallUnpairedDynamicStoreIsNotAnArgument)
 		}
 	)";
 	checkModuleAgainstExpectedIr(exp);
+}
+
+TEST_F(ParamReturnTests, x86PtrCallConsumesPairedPushValuesWithoutSyntheticStackLoads)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@target = global i32 0
+		define void @fnc() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 22, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 11, i32* %slot2
+			store i32 %sp2, i32* @esp
+			%callee = bitcast i32* @target to void()*
+			call void %callee()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	CallInst* recoveredCall = nullptr;
+	unsigned dynamicStores = 0;
+	for (BasicBlock& block : *module->getFunction("fnc"))
+	for (Instruction& instruction : block)
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			if (!call->getCalledFunction())
+			{
+				recoveredCall = call;
+			}
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			dynamicStores += !config.isStackPointerRegister(
+					store->getPointerOperand())
+					&& !isa<GlobalVariable>(store->getPointerOperand());
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(11));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->equalsInt(22));
+	EXPECT_EQ(0u, dynamicStores);
 }
 
 TEST_F(ParamReturnTests, x86ExternalCallCountsResolvedAndUnresolvedStackArguments)
@@ -765,11 +813,9 @@ TEST_F(ParamReturnTests, x86ExternalCallCountsResolvedAndUnresolvedStackArgument
 			store i32 %sp1, i32* @esp
 			%sp2 = sub i32 %sp1, 4
 			%slot = inttoptr i32 %sp2 to i32*
-			store i32 111, i32* %slot
 			store i32 %sp2, i32* @esp
-			%1 = load i32, i32* %slot
-			%2 = load i32, i32* %stack_-4
-			call void @consume(i32 %1, i32 %2)
+			%1 = load i32, i32* %stack_-4
+			call void @consume(i32 111, i32 %1)
 			ret void
 		}
 	)";
