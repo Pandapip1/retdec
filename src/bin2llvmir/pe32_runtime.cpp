@@ -134,6 +134,17 @@ uint32_t registerRegion(
 			}
 			return region.guestBase;
 		}
+		if (hostBase >= region.hostBase
+				&& hostBase - region.hostBase < region.extent
+				&& extent <= region.extent - (hostBase - region.hostBase))
+		{
+			const uint32_t containedGuest = region.guestBase
+					+ static_cast<uint32_t>(hostBase - region.hostBase);
+			return preferredGuestBase == 0
+					|| preferredGuestBase == containedGuest
+					? containedGuest
+					: 0;
+		}
 		if (rangesOverlap(hostBase, extent, region.hostBase, region.extent))
 		{
 			return 0;
@@ -204,6 +215,18 @@ extern "C" uint32_t __retdec_pe32_host_to_guest(
 		return 0;
 	}
 	const auto address = reinterpret_cast<uintptr_t>(pointer);
+	{
+		std::lock_guard<std::mutex> lock(regionsMutex);
+		for (const auto& region : regions)
+		{
+			if (address >= region.hostBase
+					&& address - region.hostBase < region.extent)
+			{
+				return region.guestBase + static_cast<uint32_t>(
+						address - region.hostBase);
+			}
+		}
+	}
 	const auto base = reinterpret_cast<uintptr_t>(allocationBase);
 	if (!hostRangeValid(base, allocationSize)
 			|| address < base

@@ -99,6 +99,25 @@ TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(first.data()));
 }
 
+TEST(Pe32RuntimeTests, TranslatesObjectsAndFunctionsInsideRegisteredSections)
+{
+	std::array<uint8_t, 128> section{};
+	constexpr uint32_t guestBase = 0x51000000u;
+	ASSERT_EQ(guestBase,
+			retdec_pe32_register_host_object(
+					section.data(), section.size(), guestBase));
+
+	EXPECT_EQ(guestBase + 37,
+			__retdec_pe32_host_to_guest(
+					section.data() + 37, section.data() + 32, 16));
+	EXPECT_EQ(guestBase + 64,
+			retdec_pe32_register_host_function(
+					section.data() + 64, guestBase + 64));
+	EXPECT_EQ(section.data() + 64,
+			__retdec_pe32_guest_to_host(guestBase + 64));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(section.data()));
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
