@@ -101,6 +101,23 @@ bool RegisterLocalization::run()
 				}
 			}
 		}
+
+		// Register globals represent live incoming architectural state, not
+		// ordinary zero-initialized program globals. Seed every localized
+		// register before its first original use. Creating these loads after the
+		// replacement walk also prevents them from being localized recursively.
+		for (const auto& item : fnc2alloca)
+		{
+			auto* localized = item.second;
+			auto* insertBefore = localized->getNextNode();
+			assert(insertBefore != nullptr);
+			auto* incoming = new LoadInst(
+					reg,
+					reg->getName() + ".entry-value",
+					insertBefore);
+			new StoreInst(incoming, localized, insertBefore);
+			changed = true;
+		}
 	}
 
 	return changed;
