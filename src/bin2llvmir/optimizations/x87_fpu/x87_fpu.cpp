@@ -5,6 +5,7 @@
 */
 
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Operator.h>
 
@@ -472,6 +473,119 @@ bool X87FpuAnalysis::isValidRegisterIndex(int index)
 	return (X86_REG_ST0 <= index && index <= X86_REG_ST7);
 }
 
+bool X87FpuAnalysis::requiresRuntimeStackIndex(llvm::CallInst* call) const
+{
+	Value* index = call->getArgOperand(0);
+	Instruction* indexInstruction = dyn_cast<Instruction>(index);
+
+	// Look through the add/subtract used to address ST(i) relative to TOP.
+	while (auto* binary = dyn_cast_or_null<BinaryOperator>(indexInstruction))
+	{
+		if ((binary->getOpcode() != Instruction::Add
+				&& binary->getOpcode() != Instruction::Sub)
+				|| !isa<ConstantInt>(binary->getOperand(1)))
+		{
+			break;
+		}
+		indexInstruction = dyn_cast<Instruction>(binary->getOperand(0));
+	}
+
+	auto* topLoad = dyn_cast_or_null<LoadInst>(indexInstruction);
+	if (topLoad == nullptr || topLoad->getPointerOperand() != top)
+	{
+		// A value arriving through a PHI or another block cannot safely be
+		// replaced by the pass's intraprocedural numeric TOP estimate.
+		return true;
+	}
+
+	if (topLoad->getParent() != call->getParent())
+	{
+		return true;
+	}
+
+	// A callee may change TOP.  A load after such a call is live runtime state,
+	// even when the matrix analysis can guess a conventional return delta.
+	for (Instruction* i = topLoad->getPrevNode(); i != nullptr; i = i->getPrevNode())
+	{
+		if (auto* store = dyn_cast<StoreInst>(i))
+		{
+			if (store->getPointerOperand() == top)
+			{
+				return false;
+			}
+		}
+
+		auto* ordinaryCall = dyn_cast<CallInst>(i);
+		if (ordinaryCall == nullptr
+				|| _config->isLlvmX87StorePseudoFunctionCall(ordinaryCall)
+				|| _config->isLlvmX87LoadPseudoFunctionCall(ordinaryCall))
+		{
+			continue;
+		}
+
+		auto* called = ordinaryCall->getCalledFunction();
+		if (called == nullptr || !called->isIntrinsic())
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void X87FpuAnalysis::lowerRuntimeStore(llvm::CallInst* call, uint32_t regBase)
+{
+	auto* index = call->getArgOperand(0);
+	auto* value = call->getArgOperand(1);
+	IRBuilder<> irb(call);
+
+	for (unsigned regNum = 0; regNum < EMPTY_FPU_STACK; ++regNum)
+	{
+		auto* reg = _abi->getRegister(regBase + regNum);
+		assert(reg != nullptr);
+		auto* oldValue = irb.CreateLoad(reg);
+		auto* converted = IrModifier::convertValueToType(
+				value, reg->getValueType(), call);
+		auto* selected = irb.CreateSelect(
+				irb.CreateICmpEQ(index, ConstantInt::get(index->getType(), regNum)),
+				converted,
+				oldValue);
+		irb.CreateStore(selected, reg);
+	}
+
+	call->eraseFromParent();
+}
+
+void X87FpuAnalysis::lowerRuntimeLoad(llvm::CallInst* call, uint32_t regBase)
+{
+	auto* index = call->getArgOperand(0);
+	IRBuilder<> irb(call);
+	Value* result = nullptr;
+
+	for (unsigned regNum = 0; regNum < EMPTY_FPU_STACK; ++regNum)
+	{
+		auto* reg = _abi->getRegister(regBase + regNum);
+		assert(reg != nullptr);
+		auto* loaded = irb.CreateLoad(reg);
+		auto* converted = IrModifier::convertValueToType(
+				loaded, call->getType(), call);
+		if (result == nullptr)
+		{
+			result = converted;
+		}
+		else
+		{
+			result = irb.CreateSelect(
+					irb.CreateICmpEQ(index, ConstantInt::get(index->getType(), regNum)),
+					converted,
+					result);
+		}
+	}
+
+	call->replaceAllUsesWith(result);
+	call->eraseFromParent();
+}
+
 bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 		std::list<FunctionAnalyzeMetadata>& analyzedFunctionsMetadata)
 {
@@ -486,9 +600,23 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 
 		for (auto& i : funMd.pseudoCalls)
 		{
-			int regBase = uint32_t(X86_REG_ST0);
+			uint32_t regBase = uint32_t(X86_REG_ST0);
 			auto *callStore = _config->isLlvmX87StorePseudoFunctionCall(i.second);
 			auto *callLoad = _config->isLlvmX87LoadPseudoFunctionCall(i.second);
+			auto* pseudoCall = cast<CallInst>(i.second);
+
+			if (requiresRuntimeStackIndex(pseudoCall))
+			{
+				if (callStore)
+				{
+					lowerRuntimeStore(pseudoCall, regBase);
+				}
+				else
+				{
+					lowerRuntimeLoad(pseudoCall, regBase);
+				}
+				continue;
+			}
 
 			double bbIn = funMd.x(funMd.indexes[i.second->getParent()][funMd.inIndex], 0);
 			int diff = (int)i.first % EMPTY_FPU_STACK; // correction of possible stack over/under-flow
