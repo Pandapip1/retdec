@@ -104,6 +104,64 @@ TEST_F(StackPointerOpsRemoveTests, passKeepsAllStoresToNonStackPointerRegisters)
 	EXPECT_FALSE(b);
 }
 
+TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoLocalizedRegisterAtReturn)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@esi = global i32 0
+		define i32 @func() {
+			%stack_pointer = load i32, i32* @esp
+			%stack_address = inttoptr i32 %stack_pointer to i32*
+			%popped = load i32, i32* %stack_address
+			store i32 %popped, i32* @esi
+			ret i32 7
+		}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().registers.insert(retdec::config::Object(
+			"esp", retdec::config::Storage::inRegister("esp")));
+	c.getConfig().registers.insert(retdec::config::Object(
+			"esi", retdec::config::Storage::inRegister("esi")));
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &c));
+	bool loadsSyntheticStackPointer = false;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+		{
+			loadsSyntheticStackPointer |=
+					load->getPointerOperand() == module->getGlobalVariable("esp");
+		}
+	}
+	EXPECT_FALSE(loadsSyntheticStackPointer);
+	auto* restored = llvm::dyn_cast<llvm::LoadInst>(
+			getNthInstruction<llvm::StoreInst>()->getValueOperand());
+	ASSERT_NE(nullptr, restored);
+	EXPECT_EQ(module->getGlobalVariable("esi"), restored->getPointerOperand());
+}
+
+TEST_F(StackPointerOpsRemoveTests, keepsPopValueThatRemainsSemanticallyUsed)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		define i32 @func() {
+			%local = alloca i32
+			%stack_pointer = load i32, i32* @esp
+			%stack_address = inttoptr i32 %stack_pointer to i32*
+			%popped = load i32, i32* %stack_address
+			store i32 %popped, i32* %local
+			ret i32 %popped
+		}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().registers.insert(retdec::config::Object(
+			"esp", retdec::config::Storage::inRegister("esp")));
+
+	EXPECT_FALSE(pass.runOnModuleCustom(*module, &c));
+	EXPECT_NE(nullptr, getValueByName("popped"));
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
