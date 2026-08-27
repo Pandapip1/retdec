@@ -76,49 +76,11 @@ bool SelectFunctions::run(Module& M)
 		LOG << "\t" << f.getName().str() << ": " << cf->getStart()
 				<< " -- " << cf->getEnd() << std::endl;
 
-		bool inRanges = false;
-		retdec::common::AddressRange fncRange;
-		if (cf->getStart().isDefined()
-				&& cf->getEnd().isDefined()
-				&& cf->getStart() < cf->getEnd())
-		{
-			fncRange = retdec::common::AddressRange(
-					cf->getStart(),
-					cf->getEnd());
-		}
-		for (auto& r : _config->getConfig().parameters.selectedRanges)
-		{
-			if (r.contains(cf->getStart()))
-			{
-				inRanges = true;
-				break;
-			}
-			if (fncRange.contains(r.getStart()))
-			{
-				inRanges = true;
-				break;
-			}
-		}
-		if (inRanges)
-		{
-			LOG << "\t\tin ranges -- keep" << std::endl;
-			continue;
-		}
-
-		bool inFunctions = false;
-		for (auto& sf : _config->getConfig().parameters.selectedFunctions)
-		{
-			if (sf == f.getName())
-			{
-				inFunctions = true;
-				break;
-			}
-		}
-		if (inFunctions)
+		if (_config->isFunctionSelected(cf))
 		{
 			_config->getConfig().parameters.selectedNotFoundFunctions.erase(
 					f.getName());
-			LOG << "\t\tin function -- keep" << std::endl;
+			LOG << "\t\tselected -- keep" << std::endl;
 			continue;
 		}
 

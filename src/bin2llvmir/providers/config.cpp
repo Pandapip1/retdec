@@ -100,6 +100,39 @@ retdec::common::Address Config::getFunctionAddress(
 	return cf ? cf->getStart() : retdec::common::Address();
 }
 
+bool Config::isFunctionSelected(const retdec::common::Function* fnc) const
+{
+	if (fnc == nullptr)
+	{
+		return false;
+	}
+
+	const auto& parameters = _configDB.parameters;
+	if (parameters.selectedFunctions.count(fnc->getName()))
+	{
+		return true;
+	}
+	retdec::common::AddressRange functionRange;
+	if (fnc->getStart().isDefined()
+			&& fnc->getEnd().isDefined()
+			&& fnc->getStart() < fnc->getEnd())
+	{
+		functionRange = retdec::common::AddressRange(
+				fnc->getStart(), fnc->getEnd());
+	}
+
+	for (const auto& range : parameters.selectedRanges)
+	{
+		if (range.contains(fnc->getStart())
+				|| functionRange.contains(range.getStart()))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 retdec::common::Function* Config::getConfigFunction(
 		const llvm::Function* fnc)
 {

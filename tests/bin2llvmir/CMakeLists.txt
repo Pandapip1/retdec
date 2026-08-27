@@ -7,6 +7,7 @@ add_executable(tests-bin2llvmir
 	optimizations/idioms_libgcc/idioms_libgcc_tests.cpp
 	optimizations/inst_opt/inst_opt_pass_tests.cpp
 	optimizations/inst_opt/inst_opt_tests.cpp
+	optimizations/main_detection/main_detection_tests.cpp
 	optimizations/param_return/param_return_tests.cpp
 	optimizations/simple_types/simple_types_tests.cpp
 	optimizations/stack/stack_tests.cpp
