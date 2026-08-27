@@ -894,6 +894,77 @@ TEST_F(ParamReturnTests, x86PreservesUnusedMiddleStackArgumentPosition)
 			getValueByName("third_slot.frame")).getValue());
 }
 
+TEST_F(ParamReturnTests, x86CallbackPreservesUnusedMiddleStackArgumentPosition)
+{
+	parseInput(R"(
+		define void @callback() {
+			%first_slot = alloca i32
+			%third_slot = alloca i32
+			%fourth_slot = alloca i32
+			%first = load i32, i32* %first_slot
+			%third = load i32, i32* %third_slot
+			%fourth = load i32, i32* %fourth_slot
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "callback",
+				"locals" : [
+					{
+						"name" : "first_slot",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "third_slot",
+						"storage" : { "type" : "stack", "value" : 12 }
+					},
+					{
+						"name" : "fourth_slot",
+						"storage" : { "type" : "stack", "value" : 16 }
+					}
+				]
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* callback = module->getFunction("callback");
+	ASSERT_NE(nullptr, callback);
+	ASSERT_EQ(4u, callback->arg_size());
+	for (auto& argument : callback->args())
+	{
+		EXPECT_TRUE(argument.getType()->isIntegerTy(32));
+	}
+
+	auto argument = callback->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	auto* unusedArgument = &*argument++;
+	EXPECT_FALSE(unusedArgument->use_empty());
+	EXPECT_FALSE((argument++)->use_empty());
+	EXPECT_FALSE(argument->use_empty());
+
+	auto* unusedSlot = config.getLlvmStackVariable(callback, 8);
+	ASSERT_NE(nullptr, unusedSlot);
+	bool storesUnusedArgument = false;
+	for (auto* user : unusedArgument->users())
+	{
+		if (auto* store = dyn_cast<StoreInst>(user))
+		{
+			storesUnusedArgument |= store->getPointerOperand() == unusedSlot;
+		}
+	}
+	EXPECT_TRUE(storesUnusedArgument);
+}
+
 TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 {
 	parseInput(R"(

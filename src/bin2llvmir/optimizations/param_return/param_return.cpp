@@ -2785,11 +2785,64 @@ void DataFlowEntry::setArgumentTypes()
 {
 	if (calls.empty())
 	{
+		bool positionalX86StackArguments =
+				_config->getConfig().architecture.isX86_32();
+		const uint64_t slotSize = positionalX86StackArguments
+				? _config->getConfig().architecture.getByteSize() : 0;
+		int64_t nextOffset = slotSize;
 		for (auto* load : argLoads)
 		{
+			auto loadOffset = _config->getStackVariableOffset(
+					load->getPointerOperand());
+			if (loadOffset.isUndefined()
+					|| loadOffset.getValue() < nextOffset
+					|| (loadOffset.getValue() - int64_t(slotSize))
+							% int64_t(slotSize) != 0)
+			{
+				positionalX86StackArguments = false;
+				break;
+			}
+
 			auto* type = load->getType();
-			argTypes.push_back(type->isFloatingPointTy()
-					? type : Abi::getDefaultType(_module));
+			type = type->isFloatingPointTy()
+					? type : Abi::getDefaultType(_module);
+			uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
+			nextOffset = loadOffset.getValue() + std::max<uint64_t>(
+					slotSize,
+					((size + slotSize - 1) / slotSize) * slotSize);
+		}
+
+		if (positionalX86StackArguments)
+		{
+			nextOffset = slotSize;
+			for (auto* load : argLoads)
+			{
+				auto loadOffset = _config->getStackVariableOffset(
+						load->getPointerOperand());
+				while (nextOffset < loadOffset.getValue())
+				{
+					argTypes.push_back(Abi::getDefaultType(_module));
+					nextOffset += slotSize;
+				}
+
+				auto* type = load->getType();
+				type = type->isFloatingPointTy()
+						? type : Abi::getDefaultType(_module);
+				argTypes.push_back(type);
+				uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
+				nextOffset += std::max<uint64_t>(
+						slotSize,
+						((size + slotSize - 1) / slotSize) * slotSize);
+			}
+		}
+		else
+		{
+			for (auto* load : argLoads)
+			{
+				auto* type = load->getType();
+				argTypes.push_back(type->isFloatingPointTy()
+						? type : Abi::getDefaultType(_module));
+			}
 		}
 	}
 	else
