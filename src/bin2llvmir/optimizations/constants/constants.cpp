@@ -171,7 +171,7 @@ void ConstantsAnalysis::checkForGlobalInInstruction(
 		//   load T, @reg-or-pointer-global
 		// changes an indirect access into a read of the pointer's backing
 		// storage (and can make behavior depend on the pointer's address bits).
-		if (config->getConfig().registers.getObjectByName(gv->getName()) != nullptr
+		if (_config->getConfig().registers.getObjectByName(gv->getName()) != nullptr
 				|| gv->getValueType()->isPointerTy())
 		{
 			return;
