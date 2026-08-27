@@ -1249,6 +1249,19 @@ void EqSet::apply(
 			{
 				continue;
 			}
+
+			// Parameter recovery has already established the machine ABI slot width.
+			// SimpleTypes may refine an integer slot to an equally wide pointer or
+			// floating type, but an inferred wider internal use must not widen the
+			// function signature (and therefore every caller's stack layout).  Only
+			// explicit debug/library type information may override that boundary.
+			if (masterType.priority == eSourcePriority::PRIORITY_NONE
+					&& masterType.type != nullptr
+					&& module->getDataLayout().getTypeStoreSize(argument->getType())
+							!= module->getDataLayout().getTypeStoreSize(masterType.type))
+			{
+				continue;
+			}
 		}
 		if (!(isa<AllocaInst>(vs.value) || isa<GlobalVariable>(vs.value) || isa<Argument>(vs.value)))
 		{
@@ -1280,7 +1293,15 @@ void EqSet::apply(
 
 		LOG << "\t" << vs << "  ==>  " << llvmObjToString(masterType.type) << std::endl;
 
-		irModif.changeObjectType(objf, vs.value, masterType.type, nullptr, &instToErase);
+		irModif.changeObjectType(
+				objf,
+				vs.value,
+				masterType.type,
+				nullptr,
+				&instToErase,
+				false,
+				false,
+				true);
 	}
 
 	LOG << "\napply END   " << id << " =============================\n";
