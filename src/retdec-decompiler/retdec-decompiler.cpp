@@ -126,7 +126,6 @@ void ProgramOptions::load()
 		// Load config if specified.
 		if (isParam(i, "", "--config"))
 		{
-			auto backup = config.parameters;
 			auto file = getParamOrDie(i);
 			file = checkFile(file, "[--config]");
 
@@ -142,12 +141,8 @@ void ProgramOptions::load()
 				);
 			}
 
-			// TODO:
-			// This redefines all the params from the loaded config.
-			// Maybe we should do some kind of merge.
-			// But it is hard to know what was defined, what was not,
-			// and which value to prefer.
-			config.parameters = backup;
+			config.parameters.fixRelativePaths(
+					fs::canonical(file).parent_path().string());
 		}
 		++i;
 	}
@@ -525,13 +520,17 @@ void ProgramOptions::loadOption(std::list<std::string>::iterator& i)
 	}
 	// Input file is the only argument that does not have -x or --xyz
 	// before it. But only one input is expected.
+	else if (!c.empty() && c.front() == '-')
+	{
+		throw std::runtime_error("unknown option: " + c);
+	}
 	else if (params.getInputFile().empty())
 	{
 		params.setInputFile(c);
 	}
 	else
 	{
-		printHelpAndDie();
+		throw std::runtime_error("unexpected positional argument: " + c);
 	}
 }
 

@@ -55,6 +55,18 @@ set_target_properties(retdec-decompiler
 	PROPERTIES OUTPUT_NAME "retdec-decompiler"
 )
 
+# Keep the build-tree driver usable without requiring an install first.  The
+# driver resolves its data directory relative to build/src, mirroring the
+# installed bin/../share layout.
+set(RETDEC_DECOMPILER_BUILD_DATA_DIR
+	"${CMAKE_CURRENT_BINARY_DIR}/../share/retdec")
+file(MAKE_DIRECTORY "${RETDEC_DECOMPILER_BUILD_DATA_DIR}")
+configure_file(
+	"${CMAKE_CURRENT_SOURCE_DIR}/decompiler-config.json"
+	"${RETDEC_DECOMPILER_BUILD_DATA_DIR}/decompiler-config.json"
+	COPYONLY
+)
+
 install(TARGETS retdec-decompiler
 	RUNTIME DESTINATION ${RETDEC_INSTALL_BIN_DIR}
 )
