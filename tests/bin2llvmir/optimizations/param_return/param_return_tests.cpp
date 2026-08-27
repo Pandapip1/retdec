@@ -4,6 +4,8 @@
 * @copyright (c) 2017 Avast Software, licensed under the MIT license
 */
 
+#include <llvm/IR/InstIterator.h>
+
 #include "retdec/bin2llvmir/providers/abi/arm64.h"
 #include "retdec/bin2llvmir/providers/abi/mips64.h"
 #include "retdec/bin2llvmir/providers/abi/powerpc64.h"
@@ -273,6 +275,140 @@ TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 		}
 	)";
 	checkModuleAgainstExpectedIr(exp);
+}
+
+TEST_F(ParamReturnTests, x86CallerCleanupPreservesHiddenTrailingStackSlot)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		define i32 @consume() {
+			%stack_4 = alloca i32
+			%first = load i32, i32* %stack_4
+			%condition = icmp eq i32 %first, 0
+			br i1 %condition, label %zero, label %nonzero
+		zero:
+			ret i32 0
+		nonzero:
+			ret i32 %first
+		}
+		define i32 @caller1() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 8738, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 4369, i32* %slot2
+			store i32 %sp2, i32* @esp
+			%result = call i32 @consume()
+			%sp3 = load i32, i32* @esp
+			%clean = add i32 %sp3, 8
+			store i32 %clean, i32* @esp
+			ret i32 %result
+		}
+		define i32 @caller2() {
+			%sp4 = load i32, i32* @esp
+			%sp5 = sub i32 %sp4, 4
+			%slot3 = inttoptr i32 %sp5 to i32*
+			store i32 17476, i32* %slot3
+			store i32 %sp5, i32* @esp
+			%sp6 = sub i32 %sp5, 4
+			%slot4 = inttoptr i32 %sp6 to i32*
+			store i32 13107, i32* %slot4
+			store i32 %sp6, i32* @esp
+			%result2 = call i32 @consume()
+			%sp7 = load i32, i32* @esp
+			%clean2 = add i32 %sp7, 8
+			store i32 %clean2, i32* @esp
+			ret i32 %result2
+		}
+	)");
+	auto c = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		],
+		"functions" : [
+			{
+				"name" : "consume",
+				"startAddr" : "0x1000",
+				"endAddr" : "0x1010",
+				"locals" : [
+					{
+						"name" : "stack_4",
+						"storage" : { "type" : "stack", "value" : 4 }
+					}
+				]
+			},
+			{
+				"name" : "caller1",
+				"startAddr" : "0x2000",
+				"endAddr" : "0x2020"
+			},
+			{
+				"name" : "caller2",
+				"startAddr" : "0x3000",
+				"endAddr" : "0x3020"
+			}
+		]
+	})");
+	auto config = Config::fromConfig(module.get(), c);
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto* trailingSlot = config.getLlvmStackVariable(consume, 8);
+	ASSERT_NE(nullptr, trailingSlot);
+	auto argument = consume->arg_begin();
+	++argument;
+	EXPECT_TRUE(std::any_of(
+			argument->user_begin(), argument->user_end(),
+			[trailingSlot](User* user)
+			{
+				auto* store = dyn_cast<StoreInst>(user);
+				return store != nullptr
+						&& store->getPointerOperand() == trailingSlot;
+			}));
+
+	std::vector<CallInst*> calls;
+	for (const char* name : {"caller1", "caller2"})
+	{
+		for (auto& instruction : instructions(module->getFunction(name)))
+		{
+			auto* candidate = dyn_cast<CallInst>(&instruction);
+			if (candidate != nullptr && candidate->getCalledFunction() == consume)
+			{
+				calls.push_back(candidate);
+			}
+		}
+	}
+	ASSERT_EQ(2u, calls.size());
+	ASSERT_EQ(2u, calls[0]->arg_size());
+	EXPECT_EQ(4369u,
+			cast<ConstantInt>(calls[0]->getArgOperand(0))->getZExtValue());
+	EXPECT_EQ(8738u,
+			cast<ConstantInt>(calls[0]->getArgOperand(1))->getZExtValue());
+	ASSERT_EQ(2u, calls[1]->arg_size());
+	EXPECT_EQ(13107u,
+			cast<ConstantInt>(calls[1]->getArgOperand(0))->getZExtValue());
+	EXPECT_EQ(17476u,
+			cast<ConstantInt>(calls[1]->getArgOperand(1))->getZExtValue());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
 TEST_F(ParamReturnTests, x86KeepsPseudoWaitHelperZeroArgumentAbi)

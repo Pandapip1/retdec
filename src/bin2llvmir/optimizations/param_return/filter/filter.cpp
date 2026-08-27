@@ -214,10 +214,21 @@ void Filter::filterCalls(DataFlowEntry* de) const
 			filterCallArgsByDefLayout(defArgs, argTempl);
 			de->setArgs(createGroupedArgValues(defArgs));
 		}
-		else if (argTempl.stacks.size() > defArgs.stacks.size()
-				&& de->numberOfCalls() == 1 && !de->hasBranches())
+		else if (argTempl.stacks.size() > defArgs.stacks.size())
 		{
-			if (argTempl.gpRegisters.size() == defArgs.gpRegisters.size()
+			bool callsProveFullStackLayout = !de->callEntries().empty()
+					&& std::all_of(
+					de->callEntries().begin(), de->callEntries().end(),
+					[&argTempl](const CallEntry& call)
+					{
+						return call.preservesNativeStackOrder()
+								&& call.provenStackArgStores().size()
+										>= argTempl.stacks.size();
+					});
+			bool simpleSingleCall = de->numberOfCalls() == 1
+					&& !de->hasBranches();
+			if ((callsProveFullStackLayout || simpleSingleCall)
+					&& argTempl.gpRegisters.size() == defArgs.gpRegisters.size()
 				&& argTempl.fpRegisters.size() == defArgs.fpRegisters.size()
 				&& argTempl.doubleRegisters.size() == defArgs.doubleRegisters.size()
 				&& argTempl.vectorRegisters.size() == defArgs.vectorRegisters.size())
