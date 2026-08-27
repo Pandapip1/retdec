@@ -10905,6 +10905,103 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FIADD_m16)
 }
 
 //
+// X86_INS_FNSTSW
+//
+
+// DF E0  FNSTSW AX  Store the complete x87 status word in AX.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FNSTSW_ax)
+{
+	SKIP_MODE_64;
+
+	setRegisters({
+		{X86_REG_AX, 0x1234},
+		{X87_REG_IE, true},
+		{X87_REG_DE, false},
+		{X87_REG_ZE, true},
+		{X87_REG_OE, false},
+		{X87_REG_UE, true},
+		{X87_REG_PE, false},
+		{X87_REG_SF, true},
+		{X87_REG_ES, false},
+		{X87_REG_C0, true},
+		{X87_REG_C1, false},
+		{X87_REG_C2, true},
+		{X87_REG_TOP, 5},
+		{X87_REG_C3, true},
+		{X87_REG_B, true},
+	});
+
+	emulate("fnstsw ax");
+
+	EXPECT_REGISTERS_LOADED({
+		X87_REG_IE, X87_REG_DE, X87_REG_ZE, X87_REG_OE,
+		X87_REG_UE, X87_REG_PE, X87_REG_SF, X87_REG_ES,
+		X87_REG_C0, X87_REG_C1, X87_REG_C2, X87_REG_TOP,
+		X87_REG_C3, X87_REG_B,
+	});
+	EXPECT_JUST_REGISTERS_STORED({
+		{X86_REG_AX, 0xed55},
+	});
+	EXPECT_NO_MEMORY_LOADED_STORED();
+	EXPECT_NO_VALUE_CALLED();
+}
+
+// DD /7  FNSTSW m16  Store the same status word to memory.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FNSTSW_m16)
+{
+	ALL_MODES;
+
+	setRegisters({
+		{X87_REG_C0, true},
+		{X87_REG_C2, true},
+		{X87_REG_TOP, 5},
+		{X87_REG_C3, true},
+	});
+
+	emulate("fnstsw word ptr [0x1234]");
+
+	EXPECT_NO_MEMORY_LOADED();
+	EXPECT_JUST_MEMORY_STORED({
+		{0x1234, 0x6d00_w},
+	});
+	EXPECT_NO_VALUE_CALLED();
+}
+
+// A comparison followed by FNSTSW must consume the comparison's C flags.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOMP_FNSTSW_status_dependency)
+{
+	SKIP_MODE_64;
+
+	setMemory({
+		{0x1234, 3.0_f64},
+	});
+	setRegisters({
+		{X86_REG_AX, 0},
+		{X87_REG_TOP, 2},
+		{X86_REG_ST2, 2.0},
+		{X87_REG_IE, false},
+		{X87_REG_DE, false},
+		{X87_REG_ZE, false},
+		{X87_REG_OE, false},
+		{X87_REG_UE, false},
+		{X87_REG_PE, false},
+		{X87_REG_SF, false},
+		{X87_REG_ES, false},
+		{X87_REG_C0, false},
+		{X87_REG_C1, false},
+		{X87_REG_C2, false},
+		{X87_REG_C3, false},
+		{X87_REG_B, false},
+	});
+
+	emulate("fcomp qword ptr [0x1234]; fnstsw ax");
+
+	// 2.0 < 3.0 sets C0, and FCOMP advances TOP from 2 to 3.
+	EXPECT_REGISTERS_STORED({X87_REG_C0, X87_REG_C2, X87_REG_C3, X86_REG_AX});
+	EXPECT_EQ(0x1900, getRegisterValueUnsigned(X86_REG_AX));
+}
+
+//
 // X86_INS_FTST
 //
 
