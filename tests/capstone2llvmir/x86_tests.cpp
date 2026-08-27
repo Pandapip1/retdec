@@ -280,6 +280,64 @@ class Capstone2LlvmIrTranslatorX86Tests :
 		}
 };
 
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, InitialX87StateMatchesReset)
+{
+	ALL_MODES;
+
+	auto initialValue = [this](uint32_t reg) -> uint64_t
+	{
+		auto* global = getRegister(reg);
+		EXPECT_NE(nullptr, global);
+		if (global == nullptr)
+		{
+			return 0;
+		}
+		auto* value = llvm::dyn_cast<llvm::ConstantInt>(global->getInitializer());
+		EXPECT_NE(nullptr, value);
+		return value == nullptr ? uint64_t{0} : value->getZExtValue();
+	};
+
+	// The architectural reset state is control=0x037f, status=0x0000,
+	// TOP=0, and tag=0xffff (all eight x87 stack entries empty).
+	for (auto reg : {X87_REG_IM, X87_REG_DM, X87_REG_ZM,
+			X87_REG_OM, X87_REG_UM, X87_REG_PM})
+	{
+		EXPECT_EQ(1, initialValue(reg));
+	}
+	EXPECT_EQ(3, initialValue(X87_REG_PC));
+	EXPECT_EQ(0, initialValue(X87_REG_RC));
+	EXPECT_EQ(0, initialValue(X87_REG_X));
+	for (auto reg : {X87_REG_IE, X87_REG_DE, X87_REG_ZE, X87_REG_OE,
+			X87_REG_UE, X87_REG_PE, X87_REG_SF, X87_REG_ES,
+			X87_REG_C0, X87_REG_C1, X87_REG_C2, X87_REG_C3,
+			X87_REG_TOP, X87_REG_B})
+	{
+		EXPECT_EQ(0, initialValue(reg));
+	}
+	for (auto reg : {X87_REG_TAG0, X87_REG_TAG1, X87_REG_TAG2,
+			X87_REG_TAG3, X87_REG_TAG4, X87_REG_TAG5,
+			X87_REG_TAG6, X87_REG_TAG7})
+	{
+		EXPECT_EQ(3, initialValue(reg));
+	}
+}
+
+static std::vector<llvm::InlineAsm*> getInlineAsmCalls(llvm::Function* f)
+{
+	std::vector<llvm::InlineAsm*> result;
+	for (auto& instruction : llvm::instructions(f))
+	{
+		if (auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction))
+		{
+			if (auto* inlineAsm = llvm::dyn_cast<llvm::InlineAsm>(
+					call->getCalledValue()))
+			{
+				result.push_back(inlineAsm);
+			}
+		}
+	}
+	return result;
+}
 struct PrintCapstoneModeToString_x86
 {
 	template <class ParamType>
