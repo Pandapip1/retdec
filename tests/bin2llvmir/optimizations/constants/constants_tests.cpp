@@ -66,6 +66,38 @@ TEST_F(ConstantsTests, preservesRegisterIndirectWideLoad)
 	EXPECT_EQ(module->getGlobalVariable("edx"), address->getPointerOperand());
 }
 
+TEST_F(ConstantsTests, preservesIndirectLoadThroughPointerGlobal)
+{
+	parseInput(R"(
+		@pointer = global i16* null
+		define i16 @func() {
+			%runtime_pointer = load i16*, i16** @pointer
+			%value = load i16, i16* %runtime_pointer
+			ret i16 %value
+		}
+	)");
+	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		}
+	})");
+	ASSERT_NE(nullptr, config);
+	FileImageProvider::addFileImage(module.get(), createFormat(), config);
+	auto* abi = AbiProvider::addAbi(module.get(), config);
+	SymbolicTree::setAbi(abi);
+	SymbolicTree::setConfig(config);
+
+	ConstantsAnalysis pass;
+	pass.runOnModule(*module);
+
+	auto* value = cast<LoadInst>(getValueByName("value"));
+	auto* runtimePointer = cast<LoadInst>(value->getPointerOperand());
+	EXPECT_EQ(module->getGlobalVariable("pointer"),
+			runtimePointer->getPointerOperand());
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec

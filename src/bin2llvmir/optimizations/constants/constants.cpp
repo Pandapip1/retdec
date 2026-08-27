@@ -162,16 +162,21 @@ void ConstantsAnalysis::checkForGlobalInInstruction(
 	}
 
 	auto* gv = dyn_cast<GlobalVariable>(root.value);
-	if (isa<LoadInst>(inst) && gv && root.ops.size() <= 1
-			&& config->getConfig().registers.getObjectByName(gv->getName()) == nullptr)
+	if (isa<LoadInst>(inst) && gv && root.ops.size() <= 1)
 	{
-		// A register global contains a runtime address; it is not itself the
-		// memory object named by that address.  Replacing
-		//   load T, inttoptr(load @reg)
+		// A register or pointer-valued global contains a runtime address; it is
+		// not itself the memory object named by that address.  Replacing
+		//   load T, inttoptr(load @reg-or-pointer-global)
 		// with
-		//   load T, @reg
-		// changes a register-indirect access into a read of the register backing
-		// global (and can over-read it for wider FLD operands).
+		//   load T, @reg-or-pointer-global
+		// changes an indirect access into a read of the pointer's backing
+		// storage (and can make behavior depend on the pointer's address bits).
+		if (config->getConfig().registers.getObjectByName(gv->getName()) != nullptr
+				|| gv->getValueType()->isPointerTy())
+		{
+			return;
+		}
+
 		auto* conv = IrModifier::convertConstantToType(gv, val->getType());
 		_toRemove.insert(val);
 		inst->replaceUsesOfWith(val, conv);
