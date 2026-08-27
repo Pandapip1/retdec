@@ -308,6 +308,34 @@ TEST_F(IrModifierTests, changeObjectTypePreservesAllocaArraySizeAndAlignment)
 	EXPECT_EQ(8u, changed->getAlignment());
 }
 
+TEST_F(IrModifierTests, changeGlobalObjectTypePreservesDecodedAccessWidths)
+{
+	parseInput(R"(
+		@binary_global = global i32 0
+		define i32 @fnc(i32 %value) {
+			store i32 %value, i32* @binary_global
+			%loaded = load i32, i32* @binary_global
+			ret i32 %loaded
+		}
+	)");
+	auto config = Config::empty(module.get());
+	auto* global = cast<GlobalVariable>(getValueByName("binary_global"));
+	IrModifier modifier(module.get(), &config);
+	auto* changed = cast<GlobalVariable>(modifier.changeObjectType(
+			nullptr,
+			global,
+			Type::getInt64Ty(context),
+			ConstantInt::get(Type::getInt64Ty(context), 0)));
+
+	EXPECT_TRUE(changed->getValueType()->isIntegerTy(64));
+	auto* store = getNthInstruction<StoreInst>();
+	EXPECT_TRUE(store->getValueOperand()->getType()->isIntegerTy(32));
+	EXPECT_TRUE(store->getPointerOperand()->getType()->getPointerElementType()->isIntegerTy(32));
+	auto* load = getNthInstruction<LoadInst>();
+	EXPECT_TRUE(load->getType()->isIntegerTy(32));
+	EXPECT_TRUE(load->getPointerOperand()->getType()->getPointerElementType()->isIntegerTy(32));
+}
+
 TEST_F(IrModifierTests, getStackVariableWidensExistingAddressAnchor)
 {
 	parseInput(R"(
