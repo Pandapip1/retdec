@@ -185,7 +185,13 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 	abi.addRegister(X86_REG_ESI, getGlobalByName("esi"));
 
 	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
-	EXPECT_EQ(nullptr, getValueByName("popped"));
+	bool hasPoppedInstruction = false;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		hasPoppedInstruction |= instruction.getName() == "popped";
+	}
+	EXPECT_FALSE(hasPoppedInstruction);
 	EXPECT_TRUE(localized->use_empty());
 }
 
