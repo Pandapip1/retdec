@@ -27,6 +27,7 @@ class StackPointerOpsRemove : public llvm::ModulePass
 	private:
 		bool run();
 		bool removeStackPointerStores();
+		bool removeDeadRegisterRestorePops();
 		bool removePreservationStores();
 
 	private:
