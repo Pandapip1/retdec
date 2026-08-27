@@ -173,6 +173,72 @@ TEST_F(StackAnalysisTests, coalescesIndexedAndFixedStackObjectViews)
 	EXPECT_FALSE(lowerFrame.runOnModuleCustom(*module, &config));
 }
 
+TEST_F(StackAnalysisTests, restoresConfiguredWidthBeforeCoalescingAdjacentObjects)
+{
+	parseInput(R"(
+		define i32 @func(i32 %counter) {
+			%stack_var_-32 = alloca i64, align 4
+			%stack_var_-28 = alloca i32, align 4
+			%wide.counter = sext i32 %counter to i64
+			store i64 %wide.counter, i64* %stack_var_-32, align 4
+			store i32 305419896, i32* %stack_var_-28, align 4
+			%wide.loaded = load i64, i64* %stack_var_-32, align 4
+			%high = lshr i64 %wide.loaded, 32
+			%high.i32 = trunc i64 %high to i32
+			%cursor = load i32, i32* %stack_var_-28, align 4
+			%result = add i32 %high.i32, %cursor
+			ret i32 %result
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("func");
+	for (int offset : {-32, -28})
+	{
+		std::string name = "stack_var_" + std::to_string(offset);
+		retdec::config::Object object(
+				name, retdec::config::Storage::onStack(offset));
+		object.type.setLlvmIr("i32*");
+		function.locals.insert(object);
+	}
+	config.getConfig().functions.insert(function);
+
+	module->getFunction("func")->addFnAttr("retdec.stack.frame");
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+
+	auto* restored = cast<AllocaInst>(getValueByName("stack_var_-32"));
+	EXPECT_TRUE(restored->getAllocatedType()->isIntegerTy(32));
+	auto* firstMember = getValueByName("stack_var_-32.frame");
+	auto* secondMember = getValueByName("stack_var_-28.frame");
+	unsigned firstStores = 0;
+	unsigned firstLoads = 0;
+	for (BasicBlock& block : *module->getFunction("func"))
+	for (Instruction& instruction : block)
+	{
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			if (store->getPointerOperand() == firstMember)
+			{
+				EXPECT_TRUE(store->getValueOperand()->getType()->isIntegerTy(32));
+				++firstStores;
+			}
+		}
+		else if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			if (load->getPointerOperand() == firstMember)
+			{
+				EXPECT_TRUE(load->getType()->isIntegerTy(32));
+				++firstLoads;
+			}
+		}
+	}
+	EXPECT_EQ(1u, firstStores);
+	EXPECT_EQ(1u, firstLoads);
+	EXPECT_EQ(-32, config.getStackVariableOffset(firstMember).getValue());
+	EXPECT_EQ(-28, config.getStackVariableOffset(secondMember).getValue());
+}
+
 TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)
 {
 	parseInput(R"(
