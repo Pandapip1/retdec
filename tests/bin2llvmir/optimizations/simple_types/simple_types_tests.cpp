@@ -33,7 +33,7 @@ TEST_F(SimpleTypesTests, inferredUsesDoNotChangeExportedParameterAbi)
 		  ret i32 %result
 		}
 	)");
-	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+	auto configJson = config::Config::fromJsonString(R"({
 		"architecture" : {
 			"bitSize" : 32,
 			"endian" : "little",
@@ -50,6 +50,7 @@ TEST_F(SimpleTypesTests, inferredUsesDoNotChangeExportedParameterAbi)
 			}
 		]
 	})");
+	auto* config = ConfigProvider::addConfig(module.get(), configJson);
 	ASSERT_NE(nullptr, config);
 	FileImageProvider::addFileImage(module.get(), createFormat(), config);
 	AbiProvider::addAbi(module.get(), config);
@@ -85,7 +86,7 @@ TEST_F(SimpleTypesTests, inferredWideUseDoesNotWidenRecoveredInternalParameterSl
 		  ret i32 %result
 		}
 	)");
-	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+	auto configJson = config::Config::fromJsonString(R"({
 		"architecture" : {
 			"bitSize" : 32,
 			"endian" : "little",
@@ -100,6 +101,7 @@ TEST_F(SimpleTypesTests, inferredWideUseDoesNotWidenRecoveredInternalParameterSl
 			}
 		]
 	})");
+	auto* config = ConfigProvider::addConfig(module.get(), configJson);
 	ASSERT_NE(nullptr, config);
 	FileImageProvider::addFileImage(module.get(), createFormat(), config);
 	AbiProvider::addAbi(module.get(), config);
