@@ -3,6 +3,7 @@ set(RETDEC_TESTS_BIN2LLVMIR_SOURCES
 	analyses/uses_analysis_tests.cpp
 	analyses/var_depend_analysis_tests.cpp
 	optimizations/asm_inst_remover/asm_inst_remover_tests.cpp
+	optimizations/constants/constants_tests.cpp
 	optimizations/dsm_generator/dsm_generator_tests.cpp
 	optimizations/decoder/decoder_tests.cpp
 	optimizations/globals/dead_global_assign_tests.cpp
