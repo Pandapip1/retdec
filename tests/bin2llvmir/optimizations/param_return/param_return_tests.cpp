@@ -1054,9 +1054,10 @@ TEST_F(ParamReturnTests, x86RecoversDoubleStoredIntoReservedOutgoingStackBlock)
 		@esp = global i32 0
 		@eax = global i32 0
 		define void @consume() {
-			%stack_arg = alloca double
+			%stack_arg = alloca i32
 			%exponent_view = alloca i32
-			%whole = load double, double* %stack_arg
+			%stack_arg_double = bitcast i32* %stack_arg to double*
+			%whole = load double, double* %stack_arg_double
 			%exponent_word = load i32, i32* %exponent_view
 			store i32 %exponent_word, i32* @eax
 			%eax_value = load i32, i32* @eax
@@ -1118,13 +1119,19 @@ TEST_F(ParamReturnTests, x86RecoversDoubleStoredIntoReservedOutgoingStackBlock)
 	ASSERT_NE(nullptr, consume);
 	ASSERT_EQ(1u, consume->arg_size());
 	EXPECT_TRUE(consume->arg_begin()->getType()->isDoubleTy());
-	for (Instruction& instruction : consume->front())
+	auto* recoveredSlot = config.getLlvmStackVariable(consume, 4);
+	ASSERT_NE(nullptr, recoveredSlot);
+	EXPECT_TRUE(recoveredSlot->getAllocatedType()->isDoubleTy());
+	bool storesWholeArgument = false;
+	for (auto* user : consume->arg_begin()->users())
 	{
-		if (instruction.getName() == "exponent_view")
+		if (auto* store = dyn_cast<StoreInst>(user))
 		{
-			EXPECT_TRUE(instruction.use_empty());
+			storesWholeArgument |= store->getPointerOperand() == recoveredSlot
+					&& store->getValueOperand() == &*consume->arg_begin();
 		}
 	}
+	EXPECT_TRUE(storesWholeArgument);
 
 	CallInst* recoveredCall = nullptr;
 	unsigned dynamicStores = 0;
@@ -1150,6 +1157,33 @@ TEST_F(ParamReturnTests, x86RecoversDoubleStoredIntoReservedOutgoingStackBlock)
 	EXPECT_EQ(&*module->getFunction("caller")->arg_begin(),
 			recoveredCall->getArgOperand(0));
 	EXPECT_EQ(0u, dynamicStores);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	unsigned stackFrames = 0;
+	bool storesDoubleInFrame = false;
+	for (Instruction& instruction : consume->front())
+	{
+		if (auto* alloca = dyn_cast<AllocaInst>(&instruction))
+		{
+			stackFrames += alloca->getAllocatedType()->isArrayTy();
+			if (alloca->getName() == "stack_arg"
+					|| alloca->getName() == "exponent_view")
+			{
+				EXPECT_TRUE(alloca->use_empty());
+			}
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			storesDoubleInFrame |= store->getValueOperand()
+					== &*consume->arg_begin()
+					&& store->getPointerOperand()->getType()
+							->getPointerElementType()->isDoubleTy();
+		}
+		EXPECT_FALSE(isa<FPTruncInst>(instruction));
+	}
+	EXPECT_EQ(1u, stackFrames);
+	EXPECT_TRUE(storesDoubleInFrame);
 }
 
 TEST_F(ParamReturnTests, x86WideStackStoreConsumesDummyPushReservations)

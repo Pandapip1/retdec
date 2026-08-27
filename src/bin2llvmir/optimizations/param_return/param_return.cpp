@@ -2201,11 +2201,13 @@ void DataFlowEntry::applyToIrOrdinary()
 				&& !fnc->isDeclaration())
 		{
 			// A recovered cdecl signature describes physical DWORD slots in the
-			// incoming stack frame.  Do not leave an unused parameter as a hole:
-			// later code may address a wider object through an adjacent used slot
-			// (for example, a QWORD beginning at arg1 and spanning arg2).  Separate
-			// allocas for every ABI slot are subsequently put back into one
-			// byte-addressable frame by StackFrameCoalescing.
+			// incoming stack frame.  Materialize every parameter with its recovered
+			// ABI width, even when an earlier machine-word access created a narrower
+			// alloca at that offset.  Otherwise a double argument whose address is
+			// passed to another routine receives only its low DWORD.  Do not leave an
+			// unused parameter as a hole either: a wider view can span adjacent slots.
+			// StackFrameCoalescing subsequently puts these objects back into one
+			// byte-addressable frame.
 			IrModifier modifier(_module, _config);
 			uint64_t slotSize =
 					_config->getConfig().architecture.getByteSize();
@@ -2213,11 +2215,8 @@ void DataFlowEntry::applyToIrOrdinary()
 			for (std::size_t argument = 0;
 					argument < argStores.size(); ++argument)
 			{
-				if (argStores[argument] == nullptr)
-				{
-					argStores[argument] = modifier.getStackVariable(
-							fnc, offset, argTypes[argument]).first;
-				}
+				argStores[argument] = modifier.getStackVariable(
+						fnc, offset, argTypes[argument]).first;
 				uint64_t size = _module->getDataLayout().getTypeStoreSize(
 						argTypes[argument]);
 				offset += std::max<uint64_t>(
