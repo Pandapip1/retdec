@@ -12,6 +12,7 @@ set(RETDEC_TESTS_BIN2LLVMIR_SOURCES
 	optimizations/inst_opt/inst_opt_tests.cpp
 	optimizations/param_return/param_return_tests.cpp
 	optimizations/phi2seq/phi2seq_tests.cpp
+	optimizations/simple_types/simple_types_tests.cpp
 	optimizations/stack/stack_tests.cpp
 	optimizations/stack_pointer_ops/stack_pointer_ops_tests.cpp
 	optimizations/unreachable_funcs/unreachable_funcs_tests.cpp
