@@ -1927,6 +1927,7 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 {
 	parseInput(R"(
 		@esp = global i32 0
+		@ebp = global i32 0
 		declare i32 @consume()
 		define void @fnc() {
 			%previous_result = alloca i32
@@ -1934,7 +1935,8 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 			%sp0 = load i32, i32* @esp
 			%sp1 = sub i32 %sp0, 4
 			%slot1 = inttoptr i32 %sp1 to i32*
-			store i32 2, i32* %slot1
+			%frame_pointer = load i32, i32* @ebp
+			store i32 %frame_pointer, i32* %slot1
 			store i32 %sp1, i32* @esp
 			%sp2 = sub i32 %sp1, 4
 			%slot2 = inttoptr i32 %sp2 to i32*
@@ -1972,6 +1974,10 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 			{
 				"name" : "esp",
 				"storage" : { "type" : "register", "value" : "esp" }
+			},
+			{
+				"name" : "ebp",
+				"storage" : { "type" : "register", "value" : "ebp" }
 			}
 		]
 	})");
@@ -1995,8 +2001,10 @@ TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 	ASSERT_NE(nullptr, recoveredCall);
 	ASSERT_EQ(3u, recoveredCall->getNumArgOperands());
 	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(123));
+	auto* framePointer = dyn_cast<LoadInst>(recoveredCall->getArgOperand(2));
+	ASSERT_NE(nullptr, framePointer);
+	EXPECT_EQ(module->getGlobalVariable("ebp"), framePointer->getPointerOperand());
 	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->isZero());
-	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(2))->equalsInt(2));
 }
 
 TEST_F(ParamReturnTests, x86CallerCleanupRecoversArgumentsAcrossNestedCalls)

@@ -1492,7 +1492,15 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				if (l->getPointerOperand()->getName() == "ebp"
 						|| l->getPointerOperand()->getName() == "rbp")
 				{
-					disqualifiedValues.insert(ptr);
+					// Saving EBP in a prologue is not a call argument, but EBP is
+					// also an ordinary value that native code may explicitly PUSH.
+					// Exact caller cleanup plus the decoded/paired PUSH proves the
+					// latter case and must override the prologue heuristic.
+					if (cleanupBytes == 0
+							|| (!isDecodedX86Push && !isUnresolvedX86Push))
+					{
+						disqualifiedValues.insert(ptr);
+					}
 				}
 				if (_config->isRegister(ptr)
 						&& _config->isRegister(l->getPointerOperand())
