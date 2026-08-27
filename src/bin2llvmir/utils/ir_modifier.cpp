@@ -572,7 +572,8 @@ IrModifier::StackPair IrModifier::getStackVariable(
 								ret->getAllocatedType()))
 		{
 			auto* old = ret;
-			ret = cast<AllocaInst>(changeObjectType(nullptr, ret, type));
+			ret = cast<AllocaInst>(changeObjectType(
+					nullptr, ret, type, nullptr, nullptr, false, false, true));
 			csv->type.setLlvmIr(llvmObjToString(type));
 			if (old != ret && old->use_empty())
 			{
@@ -828,6 +829,8 @@ llvm::Value* IrModifier::changeObjectDeclarationType(
  *                    here and erase instructions when it is finished.
  * @param dbg    Flag to enable debug messages.
  * @param wideString Is type a wide string?
+ * @param preserveAccessWidths Keep existing alloca loads/stores at their
+ *        decoded memory widths while changing only the backing declaration.
  */
 llvm::Value* IrModifier::changeObjectType(
 		FileImage* objf,
@@ -836,7 +839,8 @@ llvm::Value* IrModifier::changeObjectType(
 		Constant* init,
 		std::unordered_set<llvm::Instruction*>* instToErase,
 		bool dbg,
-		bool wideString)
+		bool wideString,
+		bool preserveAccessWidths)
 {
 	if (!(isa<AllocaInst>(val)
 			|| isa<GlobalVariable>(val)
@@ -886,12 +890,14 @@ llvm::Value* IrModifier::changeObjectType(
 			if (val == dst)
 			{
 				// A decoded memory access carries an exact machine width.  Type
-				// recovery may infer a wider type for a global from another use,
-				// but widening this store would also write adjacent binary globals.
+				// recovery may infer a wider declaration from another use, but
+				// widening this store would change the decoded machine access and may
+				// overwrite adjacent global or stack objects.
 				// Keep the original access type and only cast the new declaration's
-				// address.  Local allocas are allowed to follow the recovered type;
-				// unlike binary globals they do not have a fixed neighbouring layout.
-				if (isa<GlobalVariable>(val))
+				// address.  This is required for overlapping local views too (for
+				// example a DWORD read from the low half of a QWORD stack object).
+				if (isa<GlobalVariable>(val)
+						|| (preserveAccessWidths && isa<AllocaInst>(val)))
 				{
 					auto* conv = IrModifier::convertValueToType(
 							nval, origType, store);
@@ -914,9 +920,10 @@ llvm::Value* IrModifier::changeObjectType(
 		{
 			assert(val == load->getPointerOperand());
 
-			// See the store case above: preserve the width of decoded reads from
-			// fixed-layout binary globals even if their declaration is retyped.
-			auto* pointer = isa<GlobalVariable>(val)
+			// See the store case above: preserve the width of decoded memory reads
+			// even if their backing declaration is retyped.
+			auto* pointer = (isa<GlobalVariable>(val)
+					|| (preserveAccessWidths && isa<AllocaInst>(val)))
 					? IrModifier::convertValueToType(nval, origType, load)
 					: nval;
 			auto* newLoad = new LoadInst(pointer);

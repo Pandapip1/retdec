@@ -10,6 +10,7 @@
 #include "retdec/bin2llvmir/providers/demangler.h"
 
 #include "retdec/bin2llvmir/optimizations/param_return/param_return.h"
+#include "retdec/bin2llvmir/optimizations/stack_pointer_ops/stack_pointer_ops.h"
 #include "bin2llvmir/utils/llvmir_tests.h"
 
 using namespace ::testing;
@@ -27,6 +28,62 @@ class ParamReturnTests: public LlvmIrTests
 	protected:
 		ParamReturn pass;
 };
+
+TEST_F(ParamReturnTests, x86MaterializesUnusedConfiguredCdeclSlot)
+{
+	parseInput(R"(
+		define void @consume() {
+			%first_slot = alloca i32
+			%first = load i32, i32* %first_slot
+			ret void
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto function = retdec::common::Function("consume");
+	function.setIsUserDefined();
+	function.locals.insert(retdec::common::Object(
+			"first_slot", retdec::common::Storage::onStack(4)));
+	for (const char* name : {"first", "unused"})
+	{
+		retdec::common::Object parameter(name, retdec::common::Storage());
+		parameter.type.setLlvmIr("i32");
+		function.parameters.push_back(parameter);
+	}
+	config.getConfig().functions.insert(function);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	auto* unusedArgument = &*argument;
+	EXPECT_FALSE(unusedArgument->use_empty());
+	auto* unusedSlot = config.getLlvmStackVariable(consume, 8);
+	ASSERT_NE(nullptr, unusedSlot);
+	bool storesUnusedArgument = false;
+	for (auto* user : unusedArgument->users())
+	{
+		if (auto* store = dyn_cast<StoreInst>(user))
+		{
+			storesUnusedArgument |= store->getPointerOperand() == unusedSlot;
+		}
+	}
+	EXPECT_TRUE(storesUnusedArgument);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
+	EXPECT_EQ(8u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+}
 
 //
 // x86

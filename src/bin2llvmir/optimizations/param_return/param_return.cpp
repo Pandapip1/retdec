@@ -914,6 +914,33 @@ void ParamReturn::modifyType(DataFlowEntry& de) const
 	}
 
 	auto args = de.args();
+	if (_config->getConfig().architecture.isX86_32()
+			&& de.getFunction() != nullptr
+			&& !de.getFunction()->isDeclaration())
+	{
+		// A recovered cdecl signature describes physical DWORD slots in the
+		// incoming stack frame. Do not leave an unused parameter as a hole:
+		// later code may address a wider object through an adjacent used slot.
+		// Separate allocas for every ABI slot are subsequently put back into one
+		// byte-addressable frame by StackFrameCoalescing.
+		args.resize(de.argTypes().size(), nullptr);
+		IrModifier modifier(_module, _config);
+		uint64_t slotSize = _config->getConfig().architecture.getByteSize();
+		int64_t offset = slotSize;
+		for (std::size_t argument = 0; argument < args.size(); ++argument)
+		{
+			auto* type = de.argTypes()[argument] != nullptr
+					? de.argTypes()[argument] : _abi->getDefaultType();
+			if (args[argument] == nullptr)
+			{
+				args[argument] = modifier.getStackVariable(
+						de.getFunction(), offset, type).first;
+			}
+			uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
+			offset += std::max<uint64_t>(
+					slotSize, ((size + slotSize - 1) / slotSize) * slotSize);
+		}
+	}
 	args.erase(
 		std::remove_if(
 			args.begin(),

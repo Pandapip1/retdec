@@ -10,6 +10,7 @@
 #include <limits>
 #include <vector>
 
+#include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
@@ -119,6 +120,18 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 		objects.push_back({alloca, offset.getValue()});
 		minimumOffset = std::min(minimumOffset, int64_t(offset.getValue()));
 		maximumEnd = std::max(maximumEnd, end);
+		// StackAnalysis offsets are relative to ESP at function entry: saved
+		// EBP is at -wordSize and the return address is at 0.  An escaped local
+		// pointer can be used by a callee as a larger aggregate than the scalar
+		// access which originally established its alloca.  Preserve the native
+		// local-frame interval conservatively through (but not across) saved EBP.
+		if (offset.getValue() < 0
+				&& PointerMayBeCaptured(alloca, true, true))
+		{
+			maximumEnd = std::max(
+					maximumEnd,
+					-int64_t(config->getConfig().architecture.getByteSize()));
+		}
 		maximumAlignment = std::max(
 				maximumAlignment,
 				std::max(
