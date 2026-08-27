@@ -49,6 +49,35 @@ static bool hasInstructionUserOutsideFunction(
 	return false;
 }
 
+static bool hasPotentialRegisterClobberBetween(
+		llvm::Instruction* definition,
+		llvm::Instruction* use)
+{
+	if (definition->getParent() != use->getParent())
+	{
+		return false;
+	}
+
+	for (auto* instruction = definition->getNextNode();
+			instruction != nullptr && instruction != use;
+			instruction = instruction->getNextNode())
+	{
+		auto* call = llvm::dyn_cast<llvm::CallBase>(instruction);
+		if (call == nullptr)
+		{
+			continue;
+		}
+
+		auto* calledFunction = call->getCalledFunction();
+		if (calledFunction == nullptr || !calledFunction->isIntrinsic())
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /**
  * store i1 %a, i1* <reg/local>
  * ...
@@ -185,7 +214,9 @@ bool defWithUsesInTheSameBb(
 		if (use->use
 				&& store->getParent() == use->use->getParent()
 				&& llvm::isa<llvm::LoadInst>(use->use)
-				&& def->dominates(use))
+				&& def->dominates(use)
+				&& !(hasCrossFunctionUse
+						&& hasPotentialRegisterClobberBetween(store, use->use)))
 		{
 			use->use->replaceAllUsesWith(store->getValueOperand());
 			if (toRemove)

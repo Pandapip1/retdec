@@ -9,6 +9,7 @@
 #include <llvm/IR/InstIterator.h>
 
 #include "bin2llvmir/utils/llvmir_tests.h"
+#include "retdec/bin2llvmir/optimizations/inst_opt_rda/inst_opt_rda_pass.h"
 #include "retdec/bin2llvmir/optimizations/x87_fpu/x87_fpu.h"
 #include "retdec/bin2llvmir/providers/abi/abi.h"
 #include "retdec/utils/string.h"
@@ -1761,7 +1762,9 @@ TEST_F(X87FpuAnalysisTests, usesRuntimeTopForValueLoadedAfterCall)
 		}
 	}
 
-	EXPECT_EQ(8u, runtimeStackLoads);
+	// The live-stack call makes both the store before the call and the load
+	// after it use the architectural runtime TOP.
+	EXPECT_EQ(16u, runtimeStackLoads);
 	EXPECT_EQ(0u, pseudoCalls);
 	auto* returned = cast<ReturnInst>(function->back().getTerminator())->getReturnValue();
 	auto* resultSelect = dyn_cast<SelectInst>(returned);
@@ -1819,6 +1822,67 @@ TEST_F(X87FpuAnalysisTests, usesRuntimeTopForCalleeEnteredWithLiveStack)
 
 	EXPECT_EQ(8u, runtimeStackLoads);
 	EXPECT_EQ(0u, pseudoCalls);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(X87FpuAnalysisTests,
+		usesRuntimeTopAndBalancesTwoSequentialLiveStackCalls)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define i3 @foo(x86_fp80 %first, x86_fp80 %second) {
+		entry:
+			%top.before.first = load i3, i3* @fpu_stat_TOP
+			%pushed.first = sub i3 %top.before.first, 1
+			store i3 %pushed.first, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed.first, x86_fp80 %first)
+			%first.result = call i32 @boo()
+			%top.after.first = load i3, i3* @fpu_stat_TOP
+			%pushed.second = sub i3 %top.after.first, 1
+			store i3 %pushed.second, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed.second, x86_fp80 %second)
+			%second.result = call i32 @boo()
+			%top.after.second = load i3, i3* @fpu_stat_TOP
+			ret i3 %top.after.second
+		}
+		define i32 @boo() {
+		entry:
+			%top.entry = load i3, i3* @fpu_stat_TOP
+			%value = call x86_fp80 @__frontend_reg_load.fpr(i3 %top.entry)
+			%result = fptosi x86_fp80 %value to i32
+			%popped = add i3 %top.entry, 1
+			store i3 %popped, i3* @fpu_stat_TOP
+			ret i32 %result
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	auto* caller = getFunctionByName("foo");
+	auto* firstIndex = getValueByName("pushed.first");
+	auto* secondIndex = getValueByName("pushed.second");
+	unsigned firstSelections = 0;
+	unsigned secondSelections = 0;
+	for (auto& instruction : instructions(caller))
+	{
+		auto* compare = dyn_cast<ICmpInst>(&instruction);
+		if (compare == nullptr)
+		{
+			continue;
+		}
+		firstSelections += compare->getOperand(0) == firstIndex;
+		secondSelections += compare->getOperand(0) == secondIndex;
+	}
+	EXPECT_EQ(8u, firstSelections);
+	EXPECT_EQ(8u, secondSelections);
+
+	InstructionRdaOptimizer rda;
+	rda.runOnModuleCustom(*module, abi);
+
+	auto* returned = cast<ReturnInst>(caller->back().getTerminator())->getReturnValue();
+	auto* finalTopLoad = dyn_cast<LoadInst>(returned);
+	ASSERT_NE(nullptr, finalTopLoad);
+	EXPECT_EQ(getGlobalByName("fpu_stat_TOP"), finalTopLoad->getPointerOperand());
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 

@@ -60,6 +60,40 @@ TEST_F(InstructionRdaOptimizerTests,
 	EXPECT_TRUE(preservedStore);
 }
 
+TEST_F(InstructionRdaOptimizerTests,
+		doesNotForwardArchitecturalRegisterValueAcrossCall)
+{
+	parseInput(R"(
+		@top = internal global i3 0
+		define i3 @caller() {
+		entry:
+			store i3 7, i3* @top
+			call void @callee()
+			%after.call = load i3, i3* @top
+			ret i3 %after.call
+		}
+		define void @callee() {
+		entry:
+			%entry.top = load i3, i3* @top
+			%popped = add i3 %entry.top, 1
+			store i3 %popped, i3* @top
+			ret void
+		}
+	)");
+	auto config = Config::empty(module.get());
+	AbiX86 abi(module.get(), &config);
+	auto* architectural = getGlobalByName("top");
+	abi.addRegister(X87_REG_TOP, architectural);
+
+	pass.runOnModuleCustom(*module, &abi);
+
+	auto* caller = getFunctionByName("caller");
+	auto* returned = cast<ReturnInst>(caller->back().getTerminator())->getReturnValue();
+	auto* loadAfterCall = dyn_cast<LoadInst>(returned);
+	ASSERT_NE(nullptr, loadAfterCall);
+	EXPECT_EQ(architectural, loadAfterCall->getPointerOperand());
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec

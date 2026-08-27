@@ -635,6 +635,13 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 			int actualTop = static_cast<int>(round(bbIn)) + callTop.second;
 			if (actualTop != EMPTY_FPU_STACK)
 			{
+				// Both sides of a call carrying a live x87 stack must use the
+				// architectural TOP.  The caller's intraprocedural CFG solution
+				// may use a different numeric origin than the runtime TOP (and a
+				// callee may update TOP), so a statically selected caller ST slot
+				// can otherwise be one or more entries away from the value the
+				// callee observes.
+				_runtimeEntryStackFunctions.insert(&funMd.function);
 				_runtimeEntryStackFunctions.insert(calledFunction);
 			}
 		}
