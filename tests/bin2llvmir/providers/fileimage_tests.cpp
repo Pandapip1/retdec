@@ -4,6 +4,8 @@
 * @copyright (c) 2017 Avast Software, licensed under the MIT license
 */
 
+#include <cstring>
+
 #include "retdec/common/tool_info.h"
 #include "retdec/utils/system.h"
 #include "retdec/bin2llvmir/providers/fileimage.h"
@@ -226,6 +228,32 @@ TEST_F(FileImageTests, getConstantReadsCorrectValuesForLongDouble)
 		EXPECT_EQ(ldType, ldConst->getType());
 		EXPECT_TRUE(ldConst->isExactlyValue(ld));
 	}
+}
+
+TEST_F(FileImageTests, getConstantPreservesAllX87ExtendedPrecisionBits)
+{
+	auto format = createFormat();
+	// Exact little-endian encoding of pi * 2^63.  The low significand bits are
+	// intentionally nonzero so decimal formatting with default precision would
+	// corrupt this constant.
+	const unsigned char raw[10] = {
+		0x35, 0xc2, 0x68, 0x21, 0xa2, 0xda, 0x0f, 0xc9, 0x3e, 0x40
+	};
+	long double value = 0.0L;
+	static_assert(sizeof(value) >= sizeof(raw), "host long double is too small");
+	std::memcpy(&value, raw, sizeof(raw));
+	auto position = format->appendData(value);
+
+	auto c = Config::empty(module.get());
+	auto image = FileImage(module.get(), format, &c);
+	auto* type = Type::getX86_FP80Ty(module->getContext());
+	auto* constant = dyn_cast_or_null<ConstantFP>(
+			image.getConstant(type, position));
+
+	ASSERT_NE(nullptr, constant);
+	auto rawValue = constant->getValueAPF().bitcastToAPInt();
+	EXPECT_EQ(0xc90fdaa22168c235ULL, rawValue.getLoBits(64).getZExtValue());
+	EXPECT_EQ(0x403eULL, rawValue.lshr(64).getZExtValue());
 }
 
 TEST_F(FileImageTests, getConstantReadsCorrectValuesForPointerType)
