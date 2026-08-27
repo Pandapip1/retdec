@@ -103,7 +103,7 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 		}
 		auto offset = config->getStackVariableOffset(alloca);
 		auto* elements = dyn_cast<ConstantInt>(alloca->getArraySize());
-		if (offset.isUndefined() || elements == nullptr)
+		if (!offset || elements == nullptr)
 		{
 			continue;
 		}
@@ -116,16 +116,16 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 			continue;
 		}
 		uint64_t size = elementSize * elementCount;
-		int64_t end = int64_t(offset.getValue()) + int64_t(size);
-		objects.push_back({alloca, offset.getValue()});
-		minimumOffset = std::min(minimumOffset, int64_t(offset.getValue()));
+		int64_t end = int64_t(*offset) + int64_t(size);
+		objects.push_back({alloca, *offset});
+		minimumOffset = std::min(minimumOffset, int64_t(*offset));
 		maximumEnd = std::max(maximumEnd, end);
 		// StackAnalysis offsets are relative to ESP at function entry: saved
 		// EBP is at -wordSize and the return address is at 0.  An escaped local
 		// pointer can be used by a callee as a larger aggregate than the scalar
 		// access which originally established its alloca.  Preserve the native
 		// local-frame interval conservatively through (but not across) saved EBP.
-		if (offset.getValue() < 0
+		if (*offset < 0
 				&& PointerMayBeCaptured(alloca, true, true))
 		{
 			maximumEnd = std::max(
@@ -153,7 +153,11 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 	uint64_t frameSize = uint64_t(maximumEnd - frameStart);
 	auto* frameType = ArrayType::get(Type::getInt8Ty(module->getContext()), frameSize);
 	auto* insertionPoint = &*function.getEntryBlock().getFirstInsertionPt();
-	auto* frame = new AllocaInst(frameType, "stack_frame", insertionPoint);
+	auto* frame = new AllocaInst(
+			frameType,
+			Abi::DEFAULT_ADDR_SPACE,
+			"stack_frame",
+			insertionPoint);
 	frame->setAlignment(maximumAlignment);
 
 	IRBuilder<> builder(insertionPoint);

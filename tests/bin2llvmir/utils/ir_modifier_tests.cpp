@@ -378,7 +378,7 @@ TEST_F(IrModifierTests, getStackVariableWidensExistingAddressAnchor)
 		}
 	)");
 	auto config = Config::empty(module.get());
-	auto function = retdec::config::Function("fnc");
+	auto function = retdec::common::Function("fnc");
 	config.getConfig().functions.insert(function);
 	IrModifier modifier(module.get(), &config);
 	auto* fnc = module->getFunction("fnc");

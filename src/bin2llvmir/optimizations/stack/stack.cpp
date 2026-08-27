@@ -80,7 +80,7 @@ AllocaInst* getStackAnchor(
 	{
 		return nullptr;
 	}
-	if (!config->isRegister(load->getPointerOperand()))
+	if (config->getConfigRegister(load->getPointerOperand()) == nullptr)
 	{
 		return nullptr;
 	}
@@ -410,11 +410,11 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 			}
 
 			auto anchorOffset = _config->getStackVariableOffset(anchor);
-			if (anchorOffset.isUndefined())
+			if (!anchorOffset)
 			{
 				continue;
 			}
-			int64_t targetOffset64 = int64_t(anchorOffset.getValue())
+			int64_t targetOffset64 = int64_t(*anchorOffset)
 					+ address.constant;
 			if (targetOffset64 < std::numeric_limits<int>::min()
 					|| targetOffset64 > std::numeric_limits<int>::max())
@@ -428,7 +428,7 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 				continue;
 			}
 
-			retdec::utils::Maybe<int> nextOffset;
+			std::optional<int> nextOffset;
 			for (Instruction& entryInstruction : function.getEntryBlock())
 			{
 				auto* candidate = dyn_cast<AllocaInst>(&entryInstruction);
@@ -437,18 +437,18 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 					continue;
 				}
 				auto offset = _config->getStackVariableOffset(candidate);
-				if (offset.isDefined() && offset > targetOffset
-						&& (nextOffset.isUndefined() || offset < nextOffset))
+				if (offset && *offset > targetOffset
+						&& (!nextOffset || *offset < *nextOffset))
 				{
-					nextOffset = offset;
+					nextOffset = *offset;
 				}
 			}
-			if (nextOffset.isUndefined())
+			if (!nextOffset)
 			{
 				continue;
 			}
 
-			uint64_t extent = uint64_t(nextOffset.getValue() - targetOffset);
+			uint64_t extent = uint64_t(*nextOffset - targetOffset);
 			uint64_t elementSize = _module->getDataLayout().getTypeAllocSize(
 					target->getAllocatedType());
 			if (elementSize == 0)
@@ -470,7 +470,7 @@ bool StackAnalysis::reconstructDynamicStackAccesses()
 			IRBuilder<> builder(memoryInstruction);
 			Value* targetAddress = builder.CreatePtrToInt(
 					target, address.base->getType(), target->getName() + ".base");
-			int64_t adjustment = int64_t(anchorOffset.getValue()) - targetOffset;
+			int64_t adjustment = int64_t(*anchorOffset) - targetOffset;
 			if (adjustment != 0)
 			{
 				targetAddress = builder.CreateAdd(
