@@ -397,16 +397,6 @@ void Capstone2LlvmIrTranslatorX86_impl::generateRegistersCommon()
 	createRegister(X87_REG_RC, _regLt);
 	createRegister(X87_REG_X, _regLt);
 
-	// x87 FPU tag registers (x87_reg_tag).
-	//
-	createRegister(X87_REG_TAG0, _regLt, i2Set);
-	createRegister(X87_REG_TAG1, _regLt, i2Set);
-	createRegister(X87_REG_TAG2, _regLt, i2Set);
-	createRegister(X87_REG_TAG3, _regLt, i2Set);
-	createRegister(X87_REG_TAG4, _regLt, i2Set);
-	createRegister(X87_REG_TAG5, _regLt, i2Set);
-	createRegister(X87_REG_TAG6, _regLt, i2Set);
-	createRegister(X87_REG_TAG7, _regLt, i2Set);
 	// 64-bit FP registers.
 	//
 	createRegister(X86_REG_FP0, _regLt);
@@ -2734,7 +2724,11 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFldcw(
 	EXPECT_IS_UNARY(i, xi, irb);
 
 	auto* control = loadOpUnary(
-			xi, irb, irb.getInt16Ty(), eOpConv::ZEXT_TRUNC);
+			xi,
+			irb,
+			irb.getInt16Ty(),
+			irb.getInt16Ty(),
+			eOpConv::ZEXT_TRUNC_OR_BITCAST);
 	const std::pair<uint32_t, unsigned> fields[] =
 	{
 		{X87_REG_IM, 0},
@@ -2799,55 +2793,8 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFnstcw(
 		control = irb.CreateOr(control, value);
 	}
 
-	storeOp(xi->operands[0], control, irb, eOpConv::ZEXT_TRUNC);
-}
-
-/**
- * X86_INS_FNSTSW
- *
- * Materialize the architectural x87 status word from the individual status
- * registers used by the translator.  Leaving this instruction unsupported
- * emits an opaque pseudo-call which is disconnected from C0--C3; optimizers
- * may then remove the comparison which produced those flags.
- */
-void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(
-		cs_insn* i,
-		cs_x86* xi,
-		llvm::IRBuilder<>& irb)
-{
-	EXPECT_IS_UNARY(i, xi, irb);
-
-	auto* i16t = irb.getInt16Ty();
-	llvm::Value* status = irb.getInt16(0);
-	const std::pair<uint32_t, unsigned> fields[] =
-	{
-		{X87_REG_IE, 0},
-		{X87_REG_DE, 1},
-		{X87_REG_ZE, 2},
-		{X87_REG_OE, 3},
-		{X87_REG_UE, 4},
-		{X87_REG_PE, 5},
-		{X87_REG_SF, 6},
-		{X87_REG_ES, 7},
-		{X87_REG_C0, 8},
-		{X87_REG_C1, 9},
-		{X87_REG_C2, 10},
-		{X87_REG_TOP, 11},
-		{X87_REG_C3, 14},
-		{X87_REG_B, 15},
-	};
-
-	for (const auto& field : fields)
-	{
-		auto* value = irb.CreateZExt(loadRegister(field.first, irb), i16t);
-		if (field.second != 0)
-		{
-			value = irb.CreateShl(value, field.second);
-		}
-		status = irb.CreateOr(status, value);
-	}
-
-	storeOp(xi->operands[0], status, irb, eOpConv::ZEXT_TRUNC);
+	storeOp(
+			xi->operands[0], control, irb, eOpConv::ZEXT_TRUNC_OR_BITCAST);
 }
 
 /**
@@ -5033,13 +4980,46 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFfree(cs_insn* i, cs_x86* xi, l
 
 /**
  * X86_INS_FNSTSW
+ *
+ * Materialize the architectural status word from the individual virtual x87
+ * status fields so comparisons remain data-dependent on their consumers.
  */
 void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb)
 {
 	EXPECT_IS_UNARY(i, xi, irb);
 
-	auto* fpsw = loadRegister(X86_REG_FPSW, irb);
-	storeOp(xi->operands[0], fpsw, irb);
+	auto* i16t = irb.getInt16Ty();
+	llvm::Value* status = irb.getInt16(0);
+	const std::pair<uint32_t, unsigned> fields[] =
+	{
+		{X87_REG_IE, 0},
+		{X87_REG_DE, 1},
+		{X87_REG_ZE, 2},
+		{X87_REG_OE, 3},
+		{X87_REG_UE, 4},
+		{X87_REG_PE, 5},
+		{X87_REG_SF, 6},
+		{X87_REG_ES, 7},
+		{X87_REG_C0, 8},
+		{X87_REG_C1, 9},
+		{X87_REG_C2, 10},
+		{X87_REG_TOP, 11},
+		{X87_REG_C3, 14},
+		{X87_REG_B, 15},
+	};
+
+	for (const auto& field : fields)
+	{
+		auto* value = irb.CreateZExt(loadRegister(field.first, irb), i16t);
+		if (field.second != 0)
+		{
+			value = irb.CreateShl(value, field.second);
+		}
+		status = irb.CreateOr(status, value);
+	}
+
+	storeOp(
+			xi->operands[0], status, irb, eOpConv::ZEXT_TRUNC_OR_BITCAST);
 }
 
 /**

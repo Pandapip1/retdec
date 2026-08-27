@@ -279,7 +279,6 @@ class Capstone2LlvmIrTranslatorX86_impl :
 		void translateFninit(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
 		void translateFldcw(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
 		void translateFnstcw(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
-		void translateFnstsw(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
 		void translateFprem1(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
 		void translateFrndint(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
 		void translateFsin(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb);
