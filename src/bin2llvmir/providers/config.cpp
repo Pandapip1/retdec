@@ -115,6 +115,44 @@ retdec::utils::Address Config::getFunctionAddress(
 	return cf ? cf->getStart() : retdec::utils::Address();
 }
 
+bool Config::isFunctionSelected(const retdec::config::Function* fnc) const
+{
+	if (fnc == nullptr)
+	{
+		return false;
+	}
+
+	const auto& parameters = _configDB.parameters;
+	if (parameters.selectedFunctions.count(fnc->getName()))
+	{
+		return true;
+	}
+	if (_configDB.isIda() && !parameters.selectedRanges.empty())
+	{
+		return parameters.selectedRanges.begin()->getStart() == fnc->getStart();
+	}
+
+	retdec::utils::AddressRange functionRange;
+	if (fnc->getStart().isDefined()
+			&& fnc->getEnd().isDefined()
+			&& fnc->getStart() < fnc->getEnd())
+	{
+		functionRange = retdec::utils::AddressRange(
+				fnc->getStart(), fnc->getEnd());
+	}
+
+	for (const auto& range : parameters.selectedRanges)
+	{
+		if (range.contains(fnc->getStart())
+				|| functionRange.contains(range.getStart()))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 retdec::config::Function* Config::getConfigFunction(
 		const llvm::Function* fnc)
 {

@@ -43,6 +43,7 @@ class Config
 
 		retdec::utils::Address getFunctionAddress(
 				const llvm::Function* fnc);
+		bool isFunctionSelected(const retdec::config::Function* fnc) const;
 
 		// Intrinsic functions.
 		//

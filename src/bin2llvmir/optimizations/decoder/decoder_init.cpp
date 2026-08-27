@@ -980,8 +980,15 @@ void Decoder::initConfigFunctions()
 	{
 		Function* f = p.first;
 
-		if (_config->getConfigFunction(p.second)) // functions from IDA
+		if (auto* cf = _config->getConfigFunction(p.second)) // functions from IDA
 		{
+			// Explicitly selected in-image library code must retain its native
+			// body and recovered ABI.  Library recognition is still useful for
+			// unselected code and does not apply to dynamically linked imports.
+			if (cf->isStaticallyLinked() && _config->isFunctionSelected(cf))
+			{
+				cf->setIsUserDefined();
+			}
 			continue;
 		}
 
@@ -998,7 +1005,14 @@ void Decoder::initConfigFunctions()
 		}
 		else if (_staticFncs.count(start))
 		{
-			cf->setIsStaticallyLinked();
+			if (_config->isFunctionSelected(cf))
+			{
+				cf->setIsUserDefined();
+			}
+			else
+			{
+				cf->setIsStaticallyLinked();
+			}
 			// Can not delete body here because of main detection.
 			//f->deleteBody();
 		}

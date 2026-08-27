@@ -60,13 +60,17 @@ bool MainDetection::runOnModuleCustom(
 
 bool MainDetection::run()
 {
-	if (_config == nullptr || _image == nullptr || _names == nullptr)
+	if (_config == nullptr)
 	{
 		return false;
 	}
 	if (skipAnalysis())
 	{
 		removeStaticallyLinked();
+		return false;
+	}
+	if (_image == nullptr || _names == nullptr)
+	{
 		return false;
 	}
 
@@ -117,7 +121,8 @@ void MainDetection::removeStaticallyLinked()
 	for (Function& f : _module->functions())
 	{
 		auto* cf = _config->getConfigFunction(&f);
-		if (cf && cf->isStaticallyLinked())
+		if (cf && cf->isStaticallyLinked()
+				&& !_config->isFunctionSelected(cf))
 		{
 			f.deleteBody();
 		}
