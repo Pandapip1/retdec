@@ -308,6 +308,37 @@ TEST_F(IrModifierTests, changeObjectTypePreservesAllocaArraySizeAndAlignment)
 	EXPECT_EQ(8u, changed->getAlignment());
 }
 
+TEST_F(IrModifierTests, getStackVariableWidensExistingAddressAnchor)
+{
+	parseInput(R"(
+		define void @fnc() {
+			ret void
+		}
+	)");
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("fnc");
+	config.getConfig().functions.insert(function);
+	IrModifier modifier(module.get(), &config);
+	auto* fnc = module->getFunction("fnc");
+
+	auto first = modifier.getStackVariable(
+			fnc, -40, Type::getInt32Ty(context));
+	ASSERT_TRUE(first.first->getAllocatedType()->isIntegerTy(32));
+	auto second = modifier.getStackVariable(
+			fnc, -40, Type::getDoubleTy(context));
+
+	EXPECT_TRUE(second.first->getAllocatedType()->isDoubleTy());
+	EXPECT_EQ("stack_var_-40", second.first->getName());
+	EXPECT_EQ(second.first, config.getLlvmStackVariable(fnc, -40));
+	EXPECT_EQ("double", second.second->type.getLlvmIr());
+	unsigned allocas = 0;
+	for (Instruction& instruction : fnc->getEntryBlock())
+	{
+		allocas += isa<AllocaInst>(instruction);
+	}
+	EXPECT_EQ(1u, allocas);
+}
+
 //
 // modifyFunction
 //
