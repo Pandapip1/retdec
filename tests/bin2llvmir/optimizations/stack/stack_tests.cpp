@@ -214,8 +214,8 @@ TEST_F(StackAnalysisTests, coalescesIndexedAndFixedStackObjectViews)
 	EXPECT_EQ(4u, frame->getAlignment());
 	auto* firstMember = getValueByName("stack_var_-776.frame");
 	auto* secondMember = getValueByName("stack_var_-772.frame");
-	EXPECT_EQ(-776, config.getStackVariableOffset(firstMember).getValue());
-	EXPECT_EQ(-772, config.getStackVariableOffset(secondMember).getValue());
+	EXPECT_EQ(-776, config.getStackVariableOffset(firstMember).value());
+	EXPECT_EQ(-772, config.getStackVariableOffset(secondMember).value());
 	auto* base = cast<PtrToIntInst>(getValueByName("base"));
 	EXPECT_EQ(firstMember, base->getPointerOperand());
 	bool fixedMemberUsesFrame = false;
@@ -296,8 +296,8 @@ TEST_F(StackAnalysisTests, restoresConfiguredWidthBeforeCoalescingAdjacentObject
 	}
 	EXPECT_EQ(1u, firstStores);
 	EXPECT_EQ(1u, firstLoads);
-	EXPECT_EQ(-32, config.getStackVariableOffset(firstMember).getValue());
-	EXPECT_EQ(-28, config.getStackVariableOffset(secondMember).getValue());
+	EXPECT_EQ(-32, config.getStackVariableOffset(firstMember).value());
+	EXPECT_EQ(-28, config.getStackVariableOffset(secondMember).value());
 }
 
 TEST_F(StackAnalysisTests, coalescesOverlappingLocalViewsWithoutDynamicFrameTag)
@@ -336,7 +336,7 @@ TEST_F(StackAnalysisTests, coalescesOverlappingLocalViewsWithoutDynamicFrameTag)
 	}
 	ASSERT_NE(nullptr, byteLoad);
 	EXPECT_EQ(-13, config.getStackVariableOffset(
-			byteLoad->getPointerOperand()).getValue());
+			byteLoad->getPointerOperand()).value());
 	EXPECT_FALSE(module->getFunction("func")->hasFnAttribute(
 			"retdec.stack.frame"));
 }
@@ -372,8 +372,8 @@ TEST_F(StackAnalysisTests, coalescesDisjointViewsOfAddressEscapedStackOutput)
 	auto* member = getValueByName("output_member.frame.addr");
 	ASSERT_NE(nullptr, start);
 	ASSERT_NE(nullptr, member);
-	EXPECT_EQ(-24, config.getStackVariableOffset(start).getValue());
-	EXPECT_EQ(-18, config.getStackVariableOffset(member).getValue());
+	EXPECT_EQ(-24, config.getStackVariableOffset(start).value());
+	EXPECT_EQ(-18, config.getStackVariableOffset(member).value());
 	CallInst* outputCall = nullptr;
 	LoadInst* memberLoad = nullptr;
 	for (auto& block : *module->getFunction("func"))
