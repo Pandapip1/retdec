@@ -608,18 +608,23 @@ void StackAnalysis::handleInstruction(
 	auto* l = dyn_cast<LoadInst>(inst);
 	if (s && s->getPointerOperand() == val)
 	{
-		auto* conv = IrModifier::convertValueToType(
-				s->getValueOperand(),
-				a->getType()->getElementType(),
-				inst);
-		new StoreInst(conv, a, inst);
+		// The alloca type describes one recovered view of the stack object; it
+		// must not change the width or bit semantics of another decoded access at
+		// the same byte offset. Cast the address, not the stored machine value.
+		auto* pointer = IrModifier::convertValueToType(
+				a, s->getPointerOperand()->getType(), inst);
+		new StoreInst(s->getValueOperand(), pointer, inst);
 		_toRemove.insert(s);
 	}
 	else if (l && l->getPointerOperand() == val)
 	{
-		auto* nl = new LoadInst(a, "", l);
-		auto* conv = IrModifier::convertValueToType(nl, l->getType(), l);
-		l->replaceAllUsesWith(conv);
+		// Preserve the decoded read width for overlapping stack views (such as a
+		// DWORD load from the low half of a QWORD temporary).
+		auto* pointer = IrModifier::convertValueToType(
+				a, l->getPointerOperand()->getType(), inst);
+		auto* nl = new LoadInst(pointer, "", l);
+		nl->takeName(l);
+		l->replaceAllUsesWith(nl);
 		_toRemove.insert(l);
 	}
 	else
