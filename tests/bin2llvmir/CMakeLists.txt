@@ -34,6 +34,24 @@ add_executable(tests-bin2llvmir
 	utils/llvm_tests.cpp
 	utils/simplifycfg_tests.cpp)
 
+if(UNIX AND NOT APPLE)
+	add_library(pe32-runtime-pic-fixture SHARED
+		pe32_runtime_pic_fixture.cpp
+	)
+	target_link_libraries(pe32-runtime-pic-fixture
+		PRIVATE retdec::pe32-runtime
+	)
+	set_target_properties(pe32-runtime-pic-fixture
+		PROPERTIES OUTPUT_NAME "retdec-pe32-runtime-pic-fixture"
+	)
+	target_sources(tests-bin2llvmir PRIVATE pe32_runtime_pic_tests.cpp)
+	target_compile_definitions(tests-bin2llvmir PRIVATE
+		"RETDEC_PE32_RUNTIME_PIC_FIXTURE=\"$<TARGET_FILE:pe32-runtime-pic-fixture>\""
+	)
+	add_dependencies(tests-bin2llvmir pe32-runtime-pic-fixture)
+	target_link_libraries(tests-bin2llvmir ${CMAKE_DL_LIBS})
+endif()
+
 target_include_directories(tests-bin2llvmir
 	PRIVATE
 		${RETDEC_TESTS_DIR}
