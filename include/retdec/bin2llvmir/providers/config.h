@@ -45,6 +45,7 @@ class Config
 
 		retdec::common::Address getFunctionAddress(
 				const llvm::Function* fnc);
+		bool isFunctionSelected(const retdec::common::Function* fnc) const;
 
 		// Intrinsic functions.
 		//
