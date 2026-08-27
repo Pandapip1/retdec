@@ -68,6 +68,55 @@ TEST_F(SimpleTypesTests, inferredUsesDoNotChangeExportedParameterAbi)
 	EXPECT_TRUE(wide->getType()->isIntegerTy(64));
 }
 
+TEST_F(SimpleTypesTests, inferredWideUseDoesNotWidenRecoveredInternalParameterSlot)
+{
+	parseInput(R"(
+		define i32 @callee(i32 %arg) {
+		entry:
+		  %wide = sext i32 %arg to i64
+		  %sum = add i64 %wide, 1
+		  %result = trunc i64 %sum to i32
+		  ret i32 %result
+		}
+
+		define i32 @caller(i32 %value) {
+		entry:
+		  %result = call i32 @callee(i32 %value)
+		  ret i32 %result
+		}
+	)");
+	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "callee",
+				"parameters" : [
+					{ "name" : "arg", "type" : { "llvmIr" : "i32" } }
+				]
+			}
+		]
+	})");
+	ASSERT_NE(nullptr, config);
+	FileImageProvider::addFileImage(module.get(), createFormat(), config);
+	AbiProvider::addAbi(module.get(), config);
+
+	SimpleTypesAnalysis pass;
+	pass.runOnModule(*module);
+
+	auto* callee = module->getFunction("callee");
+	ASSERT_NE(nullptr, callee);
+	EXPECT_TRUE(callee->getFunctionType()->getParamType(0)->isIntegerTy(32));
+	auto* caller = module->getFunction("caller");
+	ASSERT_NE(nullptr, caller);
+	auto* call = dyn_cast<CallInst>(getNthInstruction<CallInst>());
+	ASSERT_NE(nullptr, call);
+	EXPECT_TRUE(call->getArgOperand(0)->getType()->isIntegerTy(32));
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
