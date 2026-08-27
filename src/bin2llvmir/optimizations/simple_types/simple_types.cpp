@@ -1233,6 +1233,23 @@ void EqSet::apply(
 	IrModifier irModif(module, config);
 	for (auto& vs : valSet)
 	{
+		// An exported function's recovered parameter types are an ABI boundary:
+		// external callers cannot be rewritten when an internal use merely
+		// suggests another type.  Arithmetic may extend a value internally (for
+		// example CDQ followed by IDIV), and an address use may suggest a pointer,
+		// but neither changes the machine-level argument slots.  Only explicit
+		// debug/library information may refine an exported parameter here.
+		if (auto* argument = dyn_cast<Argument>(vs.value))
+		{
+			auto* functionConfig = conf.functions.getFunctionByName(
+					argument->getParent()->getName());
+			if (functionConfig
+					&& functionConfig->isExported()
+					&& masterType.priority == eSourcePriority::PRIORITY_NONE)
+			{
+				continue;
+			}
+		}
 		if (!(isa<AllocaInst>(vs.value) || isa<GlobalVariable>(vs.value) || isa<Argument>(vs.value)))
 		{
 			continue;
