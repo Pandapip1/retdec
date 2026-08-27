@@ -120,8 +120,10 @@ bool Decoder::run()
 	}
 
 	resolvePseudoCalls();
+	inlineSharedTailBranches();
 	patternsRecognize();
 	finalizePseudoCalls();
+	inlineSharedTailBranches();
 
 	if (debug_enabled && fs::exists(_config->getOutputDirectory()))
 	{
@@ -639,7 +641,7 @@ bool Decoder::getJumpTargetsFromInstruction(
 			}
 			else if (tFnc)
 			{
-				transformToCall(pCall, tFnc);
+				transformToCall(pCall, tFnc, true);
 			}
 
 			// TODO: if target was from load of import addr, do not add it,

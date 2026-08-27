@@ -11,6 +11,7 @@
 #include <optional>
 #include <queue>
 #include <sstream>
+#include <vector>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Function.h>
@@ -251,7 +252,8 @@ class Decoder : public llvm::ModulePass
 	private:
 		llvm::CallInst* transformToCall(
 				llvm::CallInst* pseudo,
-				llvm::Function* callee);
+				llvm::Function* callee,
+				bool branchOrigin = false);
 		llvm::CallInst* transformToIndirectCall(
 				llvm::CallInst* pseudo,
 				llvm::Value* callee);
@@ -294,6 +296,7 @@ class Decoder : public llvm::ModulePass
 				std::set<llvm::BasicBlock*>& newFncStarts);
 		llvm::Function* splitFunctionOn(common::Address addr);
 		llvm::Function* splitFunctionOn(common::Address addr, llvm::BasicBlock* bb);
+		void inlineSharedTailBranches();
 
 	// Data.
 	//
@@ -341,6 +344,14 @@ class Decoder : public llvm::ModulePass
 		// likely branches. For convenience, we map them to real BBs they will
 		// eventually jump to.
 		std::map<llvm::BasicBlock*, llvm::BasicBlock*> _likelyBb2Target;
+
+		struct SplitBranchCall
+		{
+			llvm::CallInst* call;
+			llvm::StoreInst* returnStore;
+			llvm::Instruction* convertedReturn;
+		};
+		std::vector<SplitBranchCall> _splitBranchCalls;
 
 		// TODO: remove, solve better.
 		bool _switchGenerated = false;
