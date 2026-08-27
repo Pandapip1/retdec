@@ -2655,9 +2655,6 @@ void Capstone2LlvmIrTranslatorX86_impl::translateNeg(cs_insn* i, cs_x86* xi, llv
  * X86_INS_NOP, X86_INS_UD2, X86_INS_UD2B, X86_INS_FNOP, X86_INS_FDISI8087_NOP,
  * X86_INS_FENI8087_NOP
  *
- * X86_INS_FNSTCW - ignore FPU control word store.
- * X86_INS_FLDCW - ignore FPU control word load.
- *
  * Complete list from the old semantics:
  * IRETD, IRET, STI, CLI, VERR, VERW, LMSW, LTR,
  * SMSW, CLTS, INVD, LOCK, RSM, RDMSR, WRMSR, RDPMC, SYSENTER,
@@ -2719,6 +2716,88 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFninit(cs_insn* i, cs_x86* xi, 
 	// FPUDataPointer = 0;
 	// FPUInstructionPointer = 0;
 	// FPULastInstructionOpcode = 0;
+}
+
+/**
+ * X86_INS_FLDCW
+ *
+ * Load the architectural x87 control word into the individual control
+ * registers used by the translator. Reserved bits do not alter virtual state.
+ */
+void Capstone2LlvmIrTranslatorX86_impl::translateFldcw(
+		cs_insn* i,
+		cs_x86* xi,
+		llvm::IRBuilder<>& irb)
+{
+	EXPECT_IS_UNARY(i, xi, irb);
+
+	auto* control = loadOpUnary(
+			xi, irb, irb.getInt16Ty(), eOpConv::ZEXT_TRUNC);
+	const std::pair<uint32_t, unsigned> fields[] =
+	{
+		{X87_REG_IM, 0},
+		{X87_REG_DM, 1},
+		{X87_REG_ZM, 2},
+		{X87_REG_OM, 3},
+		{X87_REG_UM, 4},
+		{X87_REG_PM, 5},
+		{X87_REG_PC, 8},
+		{X87_REG_RC, 10},
+		{X87_REG_X, 12},
+	};
+
+	for (const auto& field : fields)
+	{
+		llvm::Value* value = control;
+		if (field.second != 0)
+		{
+			value = irb.CreateLShr(value, field.second);
+		}
+		value = irb.CreateTrunc(value, getRegisterType(field.first));
+		storeRegister(field.first, value, irb);
+	}
+}
+
+/**
+ * X86_INS_FNSTCW
+ *
+ * Materialize the architectural x87 control word from the individual control
+ * registers used by the translator. Bit 6 is architecturally fixed to one;
+ * the remaining reserved bits are stored as zero.
+ */
+void Capstone2LlvmIrTranslatorX86_impl::translateFnstcw(
+		cs_insn* i,
+		cs_x86* xi,
+		llvm::IRBuilder<>& irb)
+{
+	EXPECT_IS_UNARY(i, xi, irb);
+
+	auto* i16t = irb.getInt16Ty();
+	llvm::Value* control = irb.getInt16(1 << 6);
+	const std::pair<uint32_t, unsigned> fields[] =
+	{
+		{X87_REG_IM, 0},
+		{X87_REG_DM, 1},
+		{X87_REG_ZM, 2},
+		{X87_REG_OM, 3},
+		{X87_REG_UM, 4},
+		{X87_REG_PM, 5},
+		{X87_REG_PC, 8},
+		{X87_REG_RC, 10},
+		{X87_REG_X, 12},
+	};
+
+	for (const auto& field : fields)
+	{
+		auto* value = irb.CreateZExt(loadRegister(field.first, irb), i16t);
+		if (field.second != 0)
+		{
+			value = irb.CreateShl(value, field.second);
+		}
+		control = irb.CreateOr(control, value);
+	}
+
+	storeOp(xi->operands[0], control, irb, eOpConv::ZEXT_TRUNC);
 }
 
 /**
