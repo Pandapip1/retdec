@@ -11099,7 +11099,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOMP_FNSTSW_status_dependency
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPREM1_native_status_and_remainder)
 {
 	ALL_MODES;
-	auto* translated = translate("fprem1");
+	auto* translated = translate(assemble("fprem1"));
 
 	auto calls = getInlineAsmCalls(translated);
 	ASSERT_EQ(1, calls.size());
@@ -12739,7 +12739,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FXCH_st3)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fcos"));
+	auto calls = getInlineAsmCalls(translate(assemble("fcos")));
 	ASSERT_EQ(1, calls.size());
 	EXPECT_EQ("fcos", calls[0]->getAsmString());
 	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
@@ -12754,7 +12754,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fsin"));
+	auto calls = getInlineAsmCalls(translate(assemble("fsin")));
 	ASSERT_EQ(1, calls.size());
 	EXPECT_EQ("fsin", calls[0]->getAsmString());
 	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
@@ -12770,7 +12770,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSINCOS_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fsincos"));
+	auto calls = getInlineAsmCalls(translate(assemble("fsincos")));
 	ASSERT_EQ(2, calls.size());
 	EXPECT_EQ("fsin", calls[0]->getAsmString());
 	EXPECT_EQ("fcos", calls[1]->getAsmString());
