@@ -4,6 +4,10 @@
 * @copyright (c) 2019 Avast Software, licensed under the MIT license
 */
 
+#include <set>
+
+#include <llvm/IR/InstIterator.h>
+
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/x87_fpu/x87_fpu.h"
 #include "retdec/bin2llvmir/providers/abi/abi.h"
@@ -1695,6 +1699,61 @@ TEST_F(X87FpuAnalysisTests, if_else_branch_fail)
 
 	EXPECT_FALSE(b);
 } // if_else_branch_fail
+
+TEST_F(X87FpuAnalysisTests, usesRuntimeTopForValueLoadedAfterCall)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		declare void @callee()
+		define x86_fp80 @foo(x86_fp80 %value) {
+		entry:
+			%top.before = load i3, i3* @fpu_stat_TOP
+			%pushed = sub i3 %top.before, 1
+			store i3 %pushed, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed, x86_fp80 %value)
+			call void @callee()
+			%top.after = load i3, i3* @fpu_stat_TOP
+			%result = call x86_fp80 @__frontend_reg_load.fpr(i3 %top.after)
+			ret x86_fp80 %result
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	std::set<Value*> stackRegisters;
+	for (unsigned n = 0; n < 8; ++n)
+	{
+		stackRegisters.insert(getGlobalByName("st" + std::to_string(n)));
+	}
+
+	auto* function = getFunctionByName("foo");
+	auto* topAfter = getValueByName("top.after");
+	unsigned runtimeStackLoads = 0;
+	unsigned pseudoCalls = 0;
+	for (auto& instruction : instructions(function))
+	{
+		if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			runtimeStackLoads += stackRegisters.count(load->getPointerOperand());
+		}
+		else if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataStorePseudoFunction();
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataLoadPseudoFunction();
+		}
+	}
+
+	EXPECT_EQ(8u, runtimeStackLoads);
+	EXPECT_EQ(0u, pseudoCalls);
+	auto* returned = cast<ReturnInst>(function->back().getTerminator())->getReturnValue();
+	auto* resultSelect = dyn_cast<SelectInst>(returned);
+	ASSERT_NE(nullptr, resultSelect);
+	auto* condition = dyn_cast<ICmpInst>(resultSelect->getCondition());
+	ASSERT_NE(nullptr, condition);
+	EXPECT_EQ(topAfter, condition->getOperand(0));
+}
 
 } // namespace tests
 } // namespace bin2llvmir

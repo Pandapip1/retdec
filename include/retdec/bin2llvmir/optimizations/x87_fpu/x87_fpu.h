@@ -58,6 +58,9 @@ class X87FpuAnalysis : public llvm::ModulePass
 	 */
 	bool optimizeAnalyzedFpuInstruction(
 			std::list<FunctionAnalyzeMetadata>& analyzedFunctionsMetadata);
+	bool requiresRuntimeStackIndex(llvm::CallInst* call) const;
+	void lowerRuntimeStore(llvm::CallInst* call, uint32_t regBase);
+	void lowerRuntimeLoad(llvm::CallInst* call, uint32_t regBase);
 	int expectedTopBasedOnRestOfBlock(
 			std::list<FunctionAnalyzeMetadata>& analyzedFunctionsMetadata,
 			llvm::Instruction& analyzedInstr);
