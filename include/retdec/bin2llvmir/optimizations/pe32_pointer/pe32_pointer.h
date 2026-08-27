@@ -40,6 +40,36 @@ class Pe32PointerLegalization : public llvm::ModulePass
 		Config* _config = nullptr;
 };
 
+/**
+ * Replace lossy PE32 host/guest pointer casts with an explicit translation
+ * ABI.  This pass is intentionally opt-in: native retargeting must provide a
+ * process-wide implementation of the two declared bridge functions.
+ *
+ * __retdec_pe32_host_to_guest(pointer, allocationBase, allocationSize)
+ * returns a stable 32-bit guest address for a native pointer.  The base and
+ * extent let the runtime preserve pointer arithmetic across an escaped stack
+ * or global object.  Unknown external objects are registered as one-byte
+ * exact mappings until a native boundary supplies a wider region.
+ *
+ * __retdec_pe32_guest_to_host(address) performs the inverse translation.
+ */
+class Pe32PointerBridge : public llvm::ModulePass
+{
+	public:
+		static char ID;
+
+		Pe32PointerBridge();
+		bool runOnModule(llvm::Module& module) override;
+		bool runOnModuleCustom(llvm::Module& module, Config* config);
+
+	private:
+		bool run();
+
+	private:
+		llvm::Module* _module = nullptr;
+		Config* _config = nullptr;
+};
+
 } // namespace bin2llvmir
 } // namespace retdec
 
