@@ -46,6 +46,7 @@ class CallEntry
 		llvm::CallInst* call = nullptr;
 		std::vector<llvm::StoreInst*> possibleArgStores;
 		std::set<llvm::StoreInst*> unresolvedStackArgStores;
+		std::vector<llvm::StoreInst*> obsoleteStackCleanupMarkers;
 		std::vector<llvm::LoadInst*> possibleRetLoads;
 		std::string formatStr;
 };

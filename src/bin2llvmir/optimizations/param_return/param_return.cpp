@@ -1115,7 +1115,9 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	NonIterableSet<Value*> disqualifiedValues;
 	unsigned maxUsedRegNum = 0;
 	Value* pendingStackPointer = nullptr;
-	auto getX86CleanupBytes = [this](CallInst* cleanedCall) -> unsigned
+	auto getX86CleanupBytes = [this](
+			CallInst* cleanedCall,
+			std::vector<StoreInst*>* cleanupMarkers) -> unsigned
 	{
 		if (!_config->getConfig().architecture.isX86())
 		{
@@ -1127,17 +1129,28 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		// emits one POP ECX per cdecl argument instead of ADD ESP, imm.  Looking at
 		// the first reconstructed ESP += 4 alone truncates a multi-argument call to
 		// one argument.  Consecutive native POPs are one cleanup sequence and each
-		// consumes one machine stack slot.
+		// consumes one machine stack slot.  Result-testing instructions may be
+		// scheduled between the CALL and its cleanup, so scan forward within the
+		// same native basic block until the first stack-affecting instruction.
+		auto callAsm = AsmInstruction(cleanedCall);
+		auto* callBlock = callAsm.getBasicBlock();
 		auto cleanupAsm = AsmInstruction(cleanedCall).getNext();
+		unsigned skippedInstructions = 0;
 		while (cleanupAsm.isValid())
 		{
 			auto* instruction = cleanupAsm.getCapstoneInsn();
-			if (instruction == nullptr)
+			if (instruction == nullptr
+					|| cleanupAsm.getBasicBlock() != callBlock)
 			{
 				break;
 			}
 			if (instruction->id == X86_INS_POP)
 			{
+				if (cleanupMarkers != nullptr)
+				{
+					cleanupMarkers->push_back(
+							cleanupAsm.getLlvmToAsmInstruction());
+				}
 				unsigned slotSize =
 						_config->getConfig().architecture.getByteSize();
 				if (slotSize == 0
@@ -1164,9 +1177,64 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 								<= std::numeric_limits<unsigned>::max() - bytes)
 				{
 					bytes += static_cast<unsigned>(x86.operands[1].imm);
+					if (cleanupMarkers != nullptr)
+					{
+						cleanupMarkers->push_back(
+								cleanupAsm.getLlvmToAsmInstruction());
+					}
 				}
 			}
-			break;
+
+			if (bytes != 0)
+			{
+				break;
+			}
+
+			bool stackPointerOperand = false;
+			if (instruction->detail != nullptr)
+			{
+				auto& x86 = instruction->detail->x86;
+				for (unsigned operand = 0; operand < x86.op_count; ++operand)
+				{
+					auto& op = x86.operands[operand];
+					stackPointerOperand |= op.type == X86_OP_REG
+							&& (op.reg == X86_REG_SP
+									|| op.reg == X86_REG_ESP
+									|| op.reg == X86_REG_RSP);
+					stackPointerOperand |= op.type == X86_OP_MEM
+							&& (op.mem.base == X86_REG_SP
+									|| op.mem.base == X86_REG_ESP
+									|| op.mem.base == X86_REG_RSP
+									|| op.mem.index == X86_REG_SP
+									|| op.mem.index == X86_REG_ESP
+									|| op.mem.index == X86_REG_RSP);
+				}
+			}
+			bool controlFlow = instruction->id == X86_INS_CALL
+					|| instruction->id == X86_INS_LCALL
+					|| instruction->id == X86_INS_JMP
+					|| instruction->id == X86_INS_LJMP
+					|| instruction->id == X86_INS_RET
+					|| instruction->id == X86_INS_RETF
+					|| instruction->id == X86_INS_RETFQ;
+			if (instruction->detail != nullptr)
+			{
+				for (unsigned group = 0;
+						group < instruction->detail->groups_count; ++group)
+				{
+					auto id = instruction->detail->groups[group];
+					controlFlow |= id == CS_GRP_JUMP
+							|| id == CS_GRP_CALL || id == CS_GRP_RET;
+				}
+			}
+			if (stackPointerOperand || controlFlow
+					|| instruction->id == X86_INS_PUSH
+					|| instruction->id == X86_INS_LEAVE
+					|| ++skippedInstructions > 8)
+			{
+				break;
+			}
+			cleanupAsm = cleanupAsm.getNext();
 		}
 
 		// If native instruction metadata is unavailable, recover a conventional
@@ -1220,7 +1288,8 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		return bytes;
 	};
 
-	unsigned cleanupBytes = getX86CleanupBytes(call);
+	unsigned cleanupBytes = getX86CleanupBytes(
+			call, &ce.obsoleteStackCleanupMarkers);
 	unsigned nestedCleanupBytes = 0;
 	uint64_t recoveredStackBytes = 0;
 	uint64_t overwrittenReservationBytes = 0;
@@ -1305,7 +1374,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				// such a helper only when its own caller cleanup proves exactly how
 				// many intervening pushes belong to it.  Those pushes are skipped
 				// below; the outer scan remains bounded by its independent cleanup.
-				unsigned nestedBytes = getX86CleanupBytes(previousCall);
+				unsigned nestedBytes = getX86CleanupBytes(previousCall, nullptr);
 				if (!_config->getConfig().architecture.isX86_32()
 						|| cleanupBytes == 0 || x86SlotSize == 0
 						|| nestedBytes == 0 || nestedBytes % x86SlotSize != 0
@@ -1520,7 +1589,24 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 					if (cleanupBytes != 0
 							&& recoveredStackBytes >= cleanupBytes)
 					{
-						break;
+						// Multiple cdecl arguments can be cleaned with adjacent POPs
+						// that collapse to a single reconstructed cleanup operation.
+						// A contiguous native PUSH immediately before the current PUSH
+						// is still unambiguously part of this call's argument block, so
+						// continue through the complete PUSH chain before applying the
+						// possibly truncated cleanup bound.
+						auto previousAsm = asmInstruction.getPrev();
+						auto* previousCapstone = previousAsm.isValid()
+								? previousAsm.getCapstoneInsn() : nullptr;
+						bool hasAdjacentPush = isDecodedX86Push
+								&& previousCapstone != nullptr
+								&& previousCapstone->id == X86_INS_PUSH
+								&& previousAsm.getEndAddress()
+										== asmInstruction.getAddress();
+						if (!hasAdjacentPush)
+						{
+							break;
+						}
 					}
 				}
 			}
@@ -2248,6 +2334,26 @@ void DataFlowEntry::applyToIrOrdinary()
 				retVal,
 				argStores,
 				argNames).first;
+
+		// Once a decoded x86 call consumes recovered SSA arguments directly,
+		// its compiler-generated ADD ESP / POP cleanup must not execute against
+		// the module-global synthetic stack pointer.  Remove only machine regions
+		// that addCallArgs() already proved to be caller cleanup.
+		for (auto& entry : calls)
+		{
+			if (entry.possibleArgStores.empty()
+					&& entry.unresolvedStackArgStores.empty())
+			{
+				continue;
+			}
+			for (auto* marker : entry.obsoleteStackCleanupMarkers)
+			{
+				if (marker->getParent() != nullptr)
+				{
+					AsmInstruction(marker).eraseInstructions();
+				}
+			}
+		}
 
 		// The recovered call now consumes each pushed SSA value directly.  Keep
 		// neither the synthetic memory write nor its potentially invalid ESP-based

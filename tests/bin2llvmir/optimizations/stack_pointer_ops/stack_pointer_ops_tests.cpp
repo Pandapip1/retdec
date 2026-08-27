@@ -141,6 +141,65 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoLocalizedRegisterAtReturn)
 	EXPECT_EQ(module->getGlobalVariable("esi"), restored->getPointerOperand());
 }
 
+TEST_F(StackPointerOpsRemoveTests, removesDeadPopChainIntoRegistersAtReturn)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@edi = global i32 0
+		@esi = global i32 0
+		@ebx = global i32 0
+		define i32 @func() {
+			%stack_pointer = load i32, i32* @esp
+			%address0 = inttoptr i32 %stack_pointer to i32*
+			%popped0 = load i32, i32* %address0
+			store i32 %popped0, i32* @edi
+			%offset4 = add i32 %stack_pointer, 4
+			%address4 = inttoptr i32 %offset4 to i32*
+			%popped4 = load i32, i32* %address4
+			store i32 %popped4, i32* @esi
+			%offset8 = add i32 %stack_pointer, 8
+			%address8 = inttoptr i32 %offset8 to i32*
+			%popped8 = load i32, i32* %address8
+			store i32 %popped8, i32* @ebx
+			ret i32 7
+		}
+	)");
+	auto c = Config::empty(module.get());
+	for (auto name : {"esp", "edi", "esi", "ebx"})
+	{
+		c.getConfig().registers.insert(retdec::config::Object(
+				name, retdec::config::Storage::inRegister(name)));
+	}
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &c));
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+		{
+			EXPECT_NE(load->getPointerOperand(),
+					module->getGlobalVariable("esp"));
+		}
+	}
+	for (auto name : {"edi", "esi", "ebx"})
+	{
+		bool restoredFromEntry = false;
+		for (auto& block : *module->getFunction("func"))
+		for (auto& instruction : block)
+		{
+			auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction);
+			auto* load = store == nullptr ? nullptr
+					: llvm::dyn_cast<llvm::LoadInst>(store->getValueOperand());
+			restoredFromEntry |= store != nullptr && load != nullptr
+					&& store->getPointerOperand()
+							== module->getGlobalVariable(name)
+					&& load->getPointerOperand()
+							== module->getGlobalVariable(name);
+		}
+		EXPECT_TRUE(restoredFromEntry);
+	}
+}
+
 TEST_F(StackPointerOpsRemoveTests, keepsPopValueThatRemainsSemanticallyUsed)
 {
 	parseInput(R"(

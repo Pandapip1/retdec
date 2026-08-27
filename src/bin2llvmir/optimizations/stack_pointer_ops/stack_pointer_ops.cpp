@@ -334,9 +334,33 @@ bool StackPointerOpsRemove::removeDeadRegisterRestorePops()
 				continue;
 			}
 			auto* address = dyn_cast<IntToPtrInst>(popped->getPointerOperand());
-			auto* stackPointer = address == nullptr
-					? nullptr
-					: dyn_cast<LoadInst>(address->getOperand(0));
+			Value* addressValue = address == nullptr
+					? nullptr : address->getOperand(0);
+			auto* stackPointer = dyn_cast_or_null<LoadInst>(addressValue);
+			if (stackPointer == nullptr)
+			{
+				// A sequence such as POP EDI; POP ESI; POP EBX is commonly
+				// represented with one load of synthetic ESP and addresses at
+				// ESP, ESP+4, and ESP+8.  Each is still only a callee-saved
+				// register restoration when it occurs in the return block.
+				auto* offset = dyn_cast_or_null<BinaryOperator>(addressValue);
+				if (offset != nullptr && offset->getOpcode() == Instruction::Add)
+				{
+					for (unsigned operand = 0; operand < 2; ++operand)
+					{
+						auto* candidate = dyn_cast<LoadInst>(
+								offset->getOperand(operand));
+						auto* amount = dyn_cast<ConstantInt>(
+								offset->getOperand(1 - operand));
+						if (candidate != nullptr && amount != nullptr
+								&& amount->getSExtValue() >= 0)
+						{
+							stackPointer = candidate;
+							break;
+						}
+					}
+				}
+			}
 			if (stackPointer == nullptr
 					|| !_config->isStackPointerRegister(
 							stackPointer->getPointerOperand()))
