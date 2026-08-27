@@ -176,7 +176,8 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 			ret void
 		}
 	)");
-	auto* localized = cast<AllocaInst>(getValueByName("esi.local"));
+	auto* localized = llvm::cast<llvm::AllocaInst>(
+			getValueByName("esi.local"));
 	localized->setName("esi");
 	auto c = Config::empty(module.get());
 	AbiX86 abi(module.get(), &c);
@@ -184,7 +185,13 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 	abi.addRegister(X86_REG_ESI, getGlobalByName("esi"));
 
 	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
-	EXPECT_EQ(nullptr, getValueByName("popped"));
+	bool hasPoppedValue = false;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		hasPoppedValue |= instruction.getName() == "popped";
+	}
+	EXPECT_FALSE(hasPoppedValue);
 	EXPECT_TRUE(localized->use_empty());
 }
 

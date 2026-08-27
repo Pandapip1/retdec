@@ -38,7 +38,7 @@ TEST_F(ConstantsTests, preservesRegisterIndirectWideLoad)
 			ret double %value
 		}
 	)");
-	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+	auto configJson = config::Config::fromJsonString(R"({
 		"architecture" : {
 			"bitSize" : 32,
 			"endian" : "little",
@@ -51,6 +51,7 @@ TEST_F(ConstantsTests, preservesRegisterIndirectWideLoad)
 			}
 		]
 	})");
+	auto* config = ConfigProvider::addConfig(module.get(), configJson);
 	ASSERT_NE(nullptr, config);
 	FileImageProvider::addFileImage(module.get(), createFormat(), config);
 	auto* abi = AbiProvider::addAbi(module.get(), config);
@@ -76,13 +77,14 @@ TEST_F(ConstantsTests, preservesIndirectLoadThroughPointerGlobal)
 			ret i16 %value
 		}
 	)");
-	auto* config = ConfigProvider::addConfigJsonString(module.get(), R"({
+	auto configJson = config::Config::fromJsonString(R"({
 		"architecture" : {
 			"bitSize" : 32,
 			"endian" : "little",
 			"name" : "x86"
 		}
 	})");
+	auto* config = ConfigProvider::addConfig(module.get(), configJson);
 	ASSERT_NE(nullptr, config);
 	FileImageProvider::addFileImage(module.get(), createFormat(), config);
 	auto* abi = AbiProvider::addAbi(module.get(), config);
