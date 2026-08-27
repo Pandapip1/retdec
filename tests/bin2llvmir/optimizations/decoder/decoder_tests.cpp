@@ -24,6 +24,9 @@ class DecoderTests: public LlvmIrTests
 		{
 			decoder._module = module.get();
 			decoder._config = &config;
+			decoder._abi = AbiProvider::addAbi(module.get(), &config);
+			decoder._abi->addRegister(
+					X86_REG_EAX, module->getGlobalVariable("eax"));
 			return decoder.transformToIndirectCall(pseudo, target);
 		}
 

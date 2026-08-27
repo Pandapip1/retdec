@@ -779,36 +779,52 @@ TEST_F(X87FpuAnalysisTests, x86_32bit_pascal_call_of_not_analyzed_function_succe
 	setX86Environment("32", "pascal");
 	bool b = pass.runOnModuleCustom(*module, config, abi);
 
-	std::string exp = PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
-		define void @boo() {
-		bb:
-		  call void @foo()
-		  %0 = load i3, i3* @fpu_stat_TOP
-		  %1 = load x86_fp80, x86_fp80* @st7
-		  %2 = add i3 %0, 1
-		  %3 = load x86_fp80, x86_fp80* @st0
-		  store i3 %2, i3* @fpu_stat_TOP
-		  ret void
+	std::set<Value*> stackRegisters;
+	for (unsigned n = 0; n < 8; ++n)
+	{
+		stackRegisters.insert(getGlobalByName("st" + std::to_string(n)));
+	}
+
+	auto* foo = getFunctionByName("foo");
+	unsigned pseudoCalls = 0;
+	for (auto& instruction : instructions(foo))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataStorePseudoFunction();
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataLoadPseudoFunction();
 		}
-		define void @foo() {
-		bb:
-		  %0 = load i3, i3* @fpu_stat_TOP
-		  store x86_fp80 0xK3FFF8000000000000000, x86_fp80* @st0
-		  %1 = sub i3 %0, 1
-		  br i1 true, label %A, label %B
-		A:
-		  %2 = sub i3 %1, 1
-		  store x86_fp80 0xK3FFF8000000000000000, x86_fp80* @st6
-		  br label %C
-		B:
-		  %3 = sub i3 %1, 2
-		  store x86_fp80 0xK3FFF8000000000000000, x86_fp80* @st5
-		  br label %C
-		C:
-		  store i3 %1, i3* @fpu_stat_TOP
-		  ret void
-		})";
-	checkModuleAgainstExpectedIr(exp);
+	}
+	EXPECT_EQ(0u, pseudoCalls);
+
+	for (auto* blockName : {"A", "B"})
+	{
+		BasicBlock* block = nullptr;
+		for (auto& candidate : *foo)
+		{
+			if (candidate.getName() == blockName)
+			{
+				block = &candidate;
+				break;
+			}
+		}
+		ASSERT_NE(nullptr, block);
+		unsigned runtimeSelects = 0;
+		unsigned stackStores = 0;
+		for (auto& instruction : *block)
+		{
+			runtimeSelects += isa<SelectInst>(&instruction);
+			if (auto* store = dyn_cast<StoreInst>(&instruction))
+			{
+				stackStores += stackRegisters.count(store->getPointerOperand());
+			}
+		}
+		EXPECT_EQ(8u, runtimeSelects);
+		EXPECT_EQ(8u, stackStores);
+	}
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 	EXPECT_TRUE(b);
 } // x86_32bit_pascal_call_of_not_analyzed_function_success
 

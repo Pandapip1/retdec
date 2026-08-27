@@ -524,10 +524,14 @@ bool X87FpuAnalysis::requiresRuntimeStackIndex(llvm::CallInst* call) const
 		}
 
 		auto* called = ordinaryCall->getCalledFunction();
-		if (called == nullptr || !called->isIntrinsic())
+		if (called == nullptr || called->isDeclaration())
 		{
 			return true;
 		}
+
+		// Calls to defined functions are covered by the pass's interprocedural
+		// stack analysis.  Keep its compact, statically selected register for
+		// those calls; only opaque callees force a runtime stack lookup.
 	}
 
 	return false;
