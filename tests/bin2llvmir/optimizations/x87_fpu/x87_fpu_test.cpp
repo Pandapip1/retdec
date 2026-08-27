@@ -1771,6 +1771,48 @@ TEST_F(X87FpuAnalysisTests, usesRuntimeTopForValueLoadedAfterCall)
 	EXPECT_EQ(topAfter, condition->getOperand(0));
 }
 
+TEST_F(X87FpuAnalysisTests, handlesIndirectCallBeforeX87Load)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define x86_fp80 @foo(void ()* %callee, x86_fp80 %value) {
+		entry:
+			%top.before = load i3, i3* @fpu_stat_TOP
+			%pushed = sub i3 %top.before, 1
+			store i3 %pushed, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed, x86_fp80 %value)
+			call void %callee()
+			%top.after = load i3, i3* @fpu_stat_TOP
+			%result = call x86_fp80 @__frontend_reg_load.fpr(i3 %top.after)
+			ret x86_fp80 %result
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	auto* function = getFunctionByName("foo");
+	auto* topAfter = getValueByName("top.after");
+	unsigned pseudoCalls = 0;
+	for (auto& instruction : instructions(function))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataStorePseudoFunction();
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataLoadPseudoFunction();
+		}
+	}
+
+	EXPECT_EQ(0u, pseudoCalls);
+	auto* returned = cast<ReturnInst>(function->back().getTerminator())->getReturnValue();
+	auto* resultSelect = dyn_cast<SelectInst>(returned);
+	ASSERT_NE(nullptr, resultSelect);
+	auto* condition = dyn_cast<ICmpInst>(resultSelect->getCondition());
+	ASSERT_NE(nullptr, condition);
+	EXPECT_EQ(topAfter, condition->getOperand(0));
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec

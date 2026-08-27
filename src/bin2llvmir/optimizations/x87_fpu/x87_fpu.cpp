@@ -325,12 +325,14 @@ bool X87FpuAnalysis::analyzeInstruction(
 		outTop = funMd.topVals.find(storeFpuTop->getValueOperand())->second;
 	}
 	// function call -> possible change value of fpu top
-	else if (callFunction && !callStore && !callLoad && !callFunction->getCalledFunction()->isIntrinsic())
+	else if (callFunction && !callStore && !callLoad
+			&& (!callFunction->getCalledFunction()
+					|| !callFunction->getCalledFunction()->isIntrinsic()))
 	{
-		auto it = getFunMd(
-				analyzedFunctionsMetadata,
-				callFunction->getCalledFunction()
-		);
+		auto* calledFunction = callFunction->getCalledFunction();
+		auto it = calledFunction
+				? getFunMd(analyzedFunctionsMetadata, calledFunction)
+				: analyzedFunctionsMetadata.end();
 
 		if (it != analyzedFunctionsMetadata.end())
 		{
@@ -432,15 +434,18 @@ int X87FpuAnalysis::expectedTopBasedOnRestOfBlock(
 		else if (callLoad && topVals.find(callLoad->getArgOperand(0)) != topVals.end())
 		{
 			auto *callFunction = dyn_cast<CallInst>(&analyzedInstr);
-			auto it = getFunMd(
-					analyzedFunctionsMetadata,
-					callFunction->getCalledFunction()
-			);
-			if (it != analyzedFunctionsMetadata.end())
+			auto* calledFunction = callFunction
+					? callFunction->getCalledFunction()
+					: nullptr;
+			if (calledFunction)
 			{
-				auto& fun = it.operator*();
-				fun.expectedTop = RETURN_VALUE_PASSED_THROUGH_ST0;
-				fun.expectedTopAnalyzed = true;
+				auto it = getFunMd(analyzedFunctionsMetadata, calledFunction);
+				if (it != analyzedFunctionsMetadata.end())
+				{
+					auto& fun = it.operator*();
+					fun.expectedTop = RETURN_VALUE_PASSED_THROUGH_ST0;
+					fun.expectedTopAnalyzed = true;
+				}
 			}
 			return DECREMENT_FPU_STACK;
 		}
