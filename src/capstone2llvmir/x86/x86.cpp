@@ -381,16 +381,30 @@ void Capstone2LlvmIrTranslatorX86_impl::generateRegistersCommon()
 
 	// x87 FPU control registers (x87_reg_control).
 	//
-	createRegister(X87_REG_IM, _regLt);
-	createRegister(X87_REG_DM, _regLt);
-	createRegister(X87_REG_ZM, _regLt);
-	createRegister(X87_REG_OM, _regLt);
-	createRegister(X87_REG_UM, _regLt);
-	createRegister(X87_REG_PM, _regLt);
-	createRegister(X87_REG_PC, _regLt);
+	auto* i1Set = llvm::ConstantInt::get(
+			llvm::cast<llvm::IntegerType>(getRegisterType(X87_REG_IM)), 1);
+	auto* i2Set = llvm::ConstantInt::get(
+			llvm::cast<llvm::IntegerType>(getRegisterType(X87_REG_PC)), 3);
+	createRegister(X87_REG_IM, _regLt, i1Set);
+	createRegister(X87_REG_DM, _regLt, i1Set);
+	createRegister(X87_REG_ZM, _regLt, i1Set);
+	createRegister(X87_REG_OM, _regLt, i1Set);
+	createRegister(X87_REG_UM, _regLt, i1Set);
+	createRegister(X87_REG_PM, _regLt, i1Set);
+	createRegister(X87_REG_PC, _regLt, i2Set);
 	createRegister(X87_REG_RC, _regLt);
 	createRegister(X87_REG_X, _regLt);
 
+	// x87 FPU tag registers (x87_reg_tag).
+	//
+	createRegister(X87_REG_TAG0, _regLt, i2Set);
+	createRegister(X87_REG_TAG1, _regLt, i2Set);
+	createRegister(X87_REG_TAG2, _regLt, i2Set);
+	createRegister(X87_REG_TAG3, _regLt, i2Set);
+	createRegister(X87_REG_TAG4, _regLt, i2Set);
+	createRegister(X87_REG_TAG5, _regLt, i2Set);
+	createRegister(X87_REG_TAG6, _regLt, i2Set);
+	createRegister(X87_REG_TAG7, _regLt, i2Set);
 	// 64-bit FP registers.
 	//
 	createRegister(X86_REG_FP0, _regLt);
