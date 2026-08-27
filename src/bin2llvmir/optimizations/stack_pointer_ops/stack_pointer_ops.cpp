@@ -17,6 +17,7 @@
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Metadata.h>
+#include <llvm/Transforms/Utils/Local.h>
 
 #include "retdec/bin2llvmir/utils/llvm.h"
 #include "retdec/utils/string.h"
@@ -280,8 +281,100 @@ bool StackPointerOpsRemove::run()
 {
 	bool changed = false;
 	changed |= removeStackPointerStores();
+	changed |= removeDeadRegisterRestorePops();
 	changed |= removePreservationStores();
 
+	return changed;
+}
+
+/**
+ * Remove a decoded POP whose value is used only to restore a localized
+ * register immediately before returning.  Once architectural registers have
+ * been localized, the recompiled function's native ABI preserves its own
+ * callee-saved registers.  Keeping the decoded POP would instead dereference
+ * the module-global synthetic stack pointer, which has no valid value when an
+ * exported lift is called through its native ABI.
+ */
+bool StackPointerOpsRemove::removeDeadRegisterRestorePops()
+{
+	if (_abi == nullptr)
+	{
+		return false;
+	}
+
+	bool changed = false;
+	for (auto& function : _module->getFunctionList())
+	for (auto& block : function)
+	{
+		if (!isa<ReturnInst>(block.getTerminator()))
+		{
+			continue;
+		}
+
+		for (auto it = block.begin(); it != block.end();)
+		{
+			auto* instruction = &*it++;
+			auto* restore = dyn_cast<StoreInst>(instruction);
+			if (restore == nullptr)
+			{
+				continue;
+			}
+			auto* localDestination = dyn_cast<AllocaInst>(
+					restore->getPointerOperand());
+			auto* registerDestination = dyn_cast<GlobalVariable>(
+					restore->getPointerOperand());
+			bool isLocalizedRegister = false;
+			if (localDestination != nullptr)
+			{
+				for (auto* reg : _abi->getRegisters())
+				{
+					isLocalizedRegister |=
+							reg->getName() == localDestination->getName();
+				}
+			}
+			if (!isLocalizedRegister
+					&& (registerDestination == nullptr
+							|| !_abi->isRegister(registerDestination)))
+			{
+				continue;
+			}
+
+			auto* popped = dyn_cast<LoadInst>(restore->getValueOperand());
+			if (popped == nullptr || !popped->hasOneUse())
+			{
+				continue;
+			}
+			auto* address = dyn_cast<IntToPtrInst>(popped->getPointerOperand());
+			auto* stackPointer = address == nullptr
+					? nullptr
+					: dyn_cast<LoadInst>(address->getOperand(0));
+			if (stackPointer == nullptr
+					|| !_abi->isStackPointerRegister(
+							stackPointer->getPointerOperand()))
+			{
+				continue;
+			}
+
+			if (registerDestination != nullptr)
+			{
+				// Before GlobalToLocal runs, preserve the exact architectural
+				// effect by restoring the register's value from function entry.
+				auto* insertionPoint =
+						&*function.getEntryBlock().getFirstInsertionPt();
+				auto* incoming = new LoadInst(
+						registerDestination,
+						registerDestination->getName() + ".entry-value",
+						insertionPoint);
+				restore->setOperand(0, incoming);
+			}
+			else
+			{
+				restore->eraseFromParent();
+			}
+			RecursivelyDeleteTriviallyDeadInstructions(popped);
+			changed = true;
+		}
+	}
 	return changed;
 }
 
