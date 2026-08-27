@@ -24,6 +24,87 @@ class StackPointerOpsRemoveTests: public LlvmIrTests
 		StackPointerOpsRemove pass;
 };
 
+class StackFrameCoalescingTests: public LlvmIrTests
+{
+	protected:
+		StackFrameCoalescing pass;
+};
+
+TEST_F(StackFrameCoalescingTests,
+		reservesMaximumAccumulatedOutgoingStackExcursion)
+{
+	parseInput(R"(
+		define void @func(i1 %condition) {
+		entry:
+			%stack_var_-104 = alloca i32, align 4
+			%stack_var_-4 = alloca i32, align 4
+			%guest.esp = ptrtoint i32* %stack_var_-104 to i32
+			br i1 %condition, label %short.path, label %long.path
+		short.path:
+			%short.esp = sub i32 %guest.esp, 16
+			br label %join
+		long.path:
+			%long.esp = sub i32 %guest.esp, 32
+			br label %join
+		join:
+			%path.esp = phi i32 [ %short.esp, %short.path ], [ %long.esp, %long.path ]
+			%outgoing.esp = sub i32 %path.esp, 12
+			%outgoing.pointer = inttoptr i32 %outgoing.esp to i32*
+			store i32 7, i32* %outgoing.pointer, align 4
+			ret void
+		}
+	)");
+	auto config = Config::empty(module.get());
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-104", retdec::common::Storage::onStack(-104)));
+	function.locals.insert(retdec::common::Object(
+			"stack_var_-4", retdec::common::Storage::onStack(-4)));
+	config.getConfig().functions.insert(function);
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &config));
+
+	auto* frame = llvm::cast<llvm::AllocaInst>(getValueByName("stack_frame"));
+	auto* frameType = llvm::cast<llvm::ArrayType>(frame->getAllocatedType());
+	// The coalesced native interval is [-148, 0): the two CFG alternatives
+	// reach -120 and -136, then the final three argument words reach -148.
+	EXPECT_EQ(148u, frameType->getNumElements());
+
+	auto* oldAnchor = llvm::cast<llvm::AllocaInst>(
+			getValueByName("stack_var_-104"));
+	EXPECT_TRUE(oldAnchor->use_empty());
+}
+
+TEST_F(StackFrameCoalescingTests,
+		expandsAnExistingFrameWhenLaterPassesExposeDeeperOutgoingAccess)
+{
+	parseInput(R"(
+		define void @func() {
+		entry:
+			%stack_frame = alloca [108 x i8], align 4, !retdec.stack.frame.start !0
+			%guest.esp = ptrtoint [108 x i8]* %stack_frame to i32
+			%deep.esp = sub i32 %guest.esp, 272
+			%deep.pointer = inttoptr i32 %deep.esp to i32*
+			store i32 9, i32* %deep.pointer, align 4
+			ret void
+		}
+		!0 = !{i64 -104}
+	)");
+	auto config = Config::empty(module.get());
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &config));
+
+	auto* frame = llvm::cast<llvm::AllocaInst>(getValueByName("stack_frame"));
+	auto* frameType = llvm::cast<llvm::ArrayType>(frame->getAllocatedType());
+	// Existing [-104, 4) plus a 0x110-byte below-ESP excursion gives
+	// [-376, 4).  The old frame base is now 272 bytes into owned storage.
+	EXPECT_EQ(380u, frameType->getNumElements());
+	auto* oldBase = llvm::cast<llvm::GetElementPtrInst>(
+			getValueByName("stack_frame.old.base"));
+	auto* prefix = llvm::cast<llvm::ConstantInt>(oldBase->getOperand(2));
+	EXPECT_EQ(272u, prefix->getZExtValue());
+}
+
 //
 // runOnModule()
 //

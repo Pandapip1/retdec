@@ -8,6 +8,8 @@
 #include <cassert>
 #include <iomanip>
 #include <limits>
+#include <optional>
+#include <set>
 #include <vector>
 
 #include <llvm/Analysis/CaptureTracking.h>
@@ -36,6 +38,33 @@ namespace bin2llvmir {
 namespace {
 
 const char* STACK_FRAME_METADATA = "retdec.stack.variable";
+const char* STACK_FRAME_START_METADATA = "retdec.stack.frame.start";
+
+std::optional<int64_t> getStackAllocaOffset(AllocaInst* alloca, Config* config)
+{
+	if (auto offset = config->getStackVariableOffset(alloca))
+	{
+		return *offset;
+	}
+	auto* metadata = alloca->getMetadata(STACK_FRAME_START_METADATA);
+	if (metadata == nullptr || metadata->getNumOperands() != 1)
+	{
+		return {};
+	}
+	auto* constant = mdconst::dyn_extract<ConstantInt>(metadata->getOperand(0));
+	return constant == nullptr
+			? std::optional<int64_t>{}
+			: std::optional<int64_t>{constant->getSExtValue()};
+}
+
+void setStackFrameStart(AllocaInst* frame, int64_t start)
+{
+	auto* value = ConstantInt::getSigned(
+			Type::getInt64Ty(frame->getContext()), start);
+	frame->setMetadata(
+			STACK_FRAME_START_METADATA,
+			MDNode::get(frame->getContext(), ConstantAsMetadata::get(value)));
+}
 
 bool isRegisterLocalizationAlloca(AllocaInst* alloca, Abi* abi)
 {
@@ -65,6 +94,184 @@ bool isRegisterLocalizationAlloca(AllocaInst* alloca, Abi* abi)
 	return false;
 }
 
+struct StackAddressRange
+{
+	int64_t minimum;
+	int64_t maximum;
+};
+
+struct StackAddressResult
+{
+	std::optional<StackAddressRange> range;
+	bool cycle = false;
+};
+
+StackAddressResult analyzeStackAddress(
+		Value* value,
+		Config* config,
+		std::set<Value*>& visiting)
+{
+	if (!visiting.insert(value).second)
+	{
+		return {{}, true};
+	}
+
+	auto finish = [&visiting, value](StackAddressResult result)
+	{
+		visiting.erase(value);
+		return result;
+	};
+
+	if (auto* ptrToInt = dyn_cast<PtrToIntInst>(value))
+	{
+		auto* anchor = dyn_cast<AllocaInst>(
+				llvm_utils::skipCasts(ptrToInt->getPointerOperand()));
+		auto offset = anchor == nullptr
+				? std::optional<int64_t>{}
+				: getStackAllocaOffset(anchor, config);
+		if (offset)
+		{
+			return finish({StackAddressRange{*offset, *offset}, false});
+		}
+	}
+	else if (auto* cast = dyn_cast<CastInst>(value))
+	{
+		return finish(analyzeStackAddress(cast->getOperand(0), config, visiting));
+	}
+	else if (auto* binary = dyn_cast<BinaryOperator>(value))
+	{
+		auto* lhsConstant = dyn_cast<ConstantInt>(binary->getOperand(0));
+		auto* rhsConstant = dyn_cast<ConstantInt>(binary->getOperand(1));
+		Value* base = nullptr;
+		int64_t adjustment = 0;
+		if (binary->getOpcode() == Instruction::Add)
+		{
+			if (rhsConstant != nullptr)
+			{
+				base = binary->getOperand(0);
+				adjustment = rhsConstant->getSExtValue();
+			}
+			else if (lhsConstant != nullptr)
+			{
+				base = binary->getOperand(1);
+				adjustment = lhsConstant->getSExtValue();
+			}
+		}
+		else if (binary->getOpcode() == Instruction::Sub
+				&& rhsConstant != nullptr)
+		{
+			base = binary->getOperand(0);
+			adjustment = -rhsConstant->getSExtValue();
+		}
+		if (base != nullptr)
+		{
+			auto result = analyzeStackAddress(base, config, visiting);
+			if (result.range)
+			{
+				result.range->minimum += adjustment;
+				result.range->maximum += adjustment;
+			}
+			return finish(result);
+		}
+	}
+	else if (auto* phi = dyn_cast<PHINode>(value))
+	{
+		std::optional<StackAddressRange> combined;
+		for (Value* incoming : phi->incoming_values())
+		{
+			auto result = analyzeStackAddress(incoming, config, visiting);
+			// A loop-carried value commonly returns the balanced stack pointer
+			// to the same PHI.  Its acyclic entry path establishes the address;
+			// each transient decrement in the loop remains visible at its memory
+			// use.  Ignore only that recursive edge, never an unrelated unknown.
+			if (result.cycle)
+			{
+				continue;
+			}
+			if (!result.range)
+			{
+				return finish({});
+			}
+			if (!combined)
+			{
+				combined = result.range;
+			}
+			else
+			{
+				combined->minimum = std::min(
+						combined->minimum, result.range->minimum);
+				combined->maximum = std::max(
+						combined->maximum, result.range->maximum);
+			}
+		}
+		return finish({combined, false});
+	}
+	else if (auto* select = dyn_cast<SelectInst>(value))
+	{
+		std::optional<StackAddressRange> combined;
+		for (unsigned index : {1u, 2u})
+		{
+			auto result = analyzeStackAddress(
+					select->getOperand(index), config, visiting);
+			if (result.cycle)
+			{
+				continue;
+			}
+			if (!result.range)
+			{
+				return finish({});
+			}
+			if (!combined)
+			{
+				combined = result.range;
+			}
+			else
+			{
+				combined->minimum = std::min(
+						combined->minimum, result.range->minimum);
+				combined->maximum = std::max(
+						combined->maximum, result.range->maximum);
+			}
+		}
+		return finish({combined, false});
+	}
+
+	return finish({});
+}
+
+std::optional<int64_t> getMinimumDynamicStackAccess(
+		Function& function,
+		Config* config)
+{
+	std::optional<int64_t> minimum;
+	for (Instruction& instruction : instructions(function))
+	{
+		Value* pointer = nullptr;
+		if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			pointer = load->getPointerOperand();
+		}
+		else if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			pointer = store->getPointerOperand();
+		}
+		if (pointer == nullptr)
+		{
+			continue;
+		}
+
+		std::set<Value*> visiting;
+		auto result = analyzeStackAddress(pointer, config, visiting);
+		if (result.range)
+		{
+			minimum = minimum
+					? std::min(*minimum, result.range->minimum)
+					: result.range->minimum;
+		}
+	}
+	return minimum;
+}
+
 /**
  * Put all recovered stack objects into one byte-addressable allocation after
  * parameter and type recovery have finished using independent allocas.
@@ -79,12 +286,68 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 
 	std::vector<StackObject> objects;
 	std::vector<AllocaInst*> allocas;
+	AllocaInst* existingFrame = nullptr;
 	for (Instruction& instruction : function.getEntryBlock())
 	{
 		if (auto* alloca = dyn_cast<AllocaInst>(&instruction))
 		{
-			allocas.push_back(alloca);
+			if (alloca->getName() == "stack_frame")
+			{
+				existingFrame = alloca;
+			}
+			else
+			{
+				allocas.push_back(alloca);
+			}
 		}
+	}
+
+	// A first stack-frame pass can run before later type/CFG simplification
+	// exposes the full emulated-ESP expression.  Revisit an already coalesced
+	// frame and prepend enough owned storage for any newly visible outgoing
+	// stack accesses.  The old base is remapped to an interior address, so all
+	// existing fixed local offsets keep their meaning.
+	if (existingFrame != nullptr)
+	{
+		auto oldStart = getStackAllocaOffset(existingFrame, config);
+		auto dynamicMinimum = getMinimumDynamicStackAccess(function, config);
+		auto* oldType = dyn_cast<ArrayType>(existingFrame->getAllocatedType());
+		if (!oldStart || !dynamicMinimum || oldType == nullptr
+				|| *dynamicMinimum >= *oldStart)
+		{
+			return false;
+		}
+		unsigned alignment = std::max(1u, existingFrame->getAlignment());
+		int64_t remainder = *dynamicMinimum % alignment;
+		if (remainder < 0)
+		{
+			remainder += alignment;
+		}
+		int64_t newStart = *dynamicMinimum - remainder;
+		uint64_t prefix = uint64_t(*oldStart - newStart);
+		uint64_t newSize = prefix + oldType->getNumElements();
+		auto* newType = ArrayType::get(
+				Type::getInt8Ty(module->getContext()), newSize);
+		auto* newFrame = new AllocaInst(
+				newType,
+				Abi::DEFAULT_ADDR_SPACE,
+				"stack_frame.expanded",
+				existingFrame);
+		newFrame->setAlignment(alignment);
+		setStackFrameStart(newFrame, newStart);
+		IRBuilder<> builder(existingFrame);
+		auto* zero = ConstantInt::get(
+				Type::getInt32Ty(module->getContext()), 0);
+		auto* index = ConstantInt::get(
+				Type::getInt32Ty(module->getContext()), prefix);
+		auto* oldBase = builder.CreateInBoundsGEP(
+				newFrame, {zero, index}, "stack_frame.old.base");
+		auto* oldAlias = builder.CreateBitCast(
+				oldBase, existingFrame->getType(), "stack_frame.old");
+		existingFrame->replaceAllUsesWith(oldAlias);
+		existingFrame->eraseFromParent();
+		newFrame->setName("stack_frame");
+		return true;
 	}
 
 	// Simple type recovery may select a type wider than the machine stack
@@ -126,10 +389,6 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 	unsigned maximumAlignment = 1;
 	for (auto* alloca : allocas)
 	{
-		if (alloca->getName() == "stack_frame")
-		{
-			return false;
-		}
 		auto offset = config->getStackVariableOffset(alloca);
 		auto* elements = dyn_cast<ConstantInt>(alloca->getArraySize());
 		if (!offset || elements == nullptr)
@@ -168,6 +427,10 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 						module->getDataLayout().getABITypeAlignment(
 								alloca->getAllocatedType())));
 	}
+	if (auto dynamicMinimum = getMinimumDynamicStackAccess(function, config))
+	{
+		minimumOffset = std::min(minimumOffset, *dynamicMinimum);
+	}
 	if (objects.empty())
 	{
 		return false;
@@ -188,6 +451,7 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 			"stack_frame",
 			insertionPoint);
 	frame->setAlignment(maximumAlignment);
+	setStackFrameStart(frame, frameStart);
 
 	IRBuilder<> builder(insertionPoint);
 	auto* zero = ConstantInt::get(Type::getInt32Ty(module->getContext()), 0);
