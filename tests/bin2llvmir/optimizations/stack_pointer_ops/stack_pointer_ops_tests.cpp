@@ -168,17 +168,18 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 		@esp = global i32 0
 		@esi = global i32 0
 		define void @func() {
-			%esi.local = alloca i32
+			%esi.global-to-local = alloca i32
+			%incoming = load i32, i32* @esi
+			store i32 %incoming, i32* %esi.global-to-local
 			%stack_pointer = load i32, i32* @esp
 			%stack_address = inttoptr i32 %stack_pointer to i32*
 			%popped = load i32, i32* %stack_address
-			store i32 %popped, i32* %esi.local
+			store i32 %popped, i32* %esi.global-to-local
 			ret void
 		}
 	)");
 	auto* localized = llvm::cast<llvm::AllocaInst>(
-			getValueByName("esi.local"));
-	localized->setName("esi");
+			getValueByName("esi.global-to-local"));
 	auto c = Config::empty(module.get());
 	AbiX86 abi(module.get(), &c);
 	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
@@ -192,7 +193,7 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 		hasPoppedValue |= instruction.getName() == "popped";
 	}
 	EXPECT_FALSE(hasPoppedValue);
-	EXPECT_TRUE(localized->use_empty());
+	EXPECT_EQ(1u, std::distance(localized->user_begin(), localized->user_end()));
 }
 
 } // namespace tests

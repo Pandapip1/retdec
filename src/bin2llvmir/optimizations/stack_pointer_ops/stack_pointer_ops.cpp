@@ -37,6 +37,34 @@ namespace {
 
 const char* STACK_FRAME_METADATA = "retdec.stack.variable";
 
+bool isRegisterLocalizationAlloca(AllocaInst* alloca, Abi* abi)
+{
+	if (alloca == nullptr || abi == nullptr)
+	{
+		return false;
+	}
+
+	// RegisterLocalization initializes every local register copy from the
+	// architectural register at function entry.  Use that provenance rather
+	// than an alloca name: LLVM may suffix the name (for example,
+	// "esi.global-to-local") when the register global already owns "esi".
+	for (User* user : alloca->users())
+	{
+		auto* store = dyn_cast<StoreInst>(user);
+		if (store == nullptr || store->getPointerOperand() != alloca)
+		{
+			continue;
+		}
+		auto* incoming = dyn_cast<LoadInst>(store->getValueOperand());
+		if (incoming != nullptr
+				&& abi->isRegister(incoming->getPointerOperand()))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Put all recovered stack objects into one byte-addressable allocation after
  * parameter and type recovery have finished using independent allocas.
@@ -323,15 +351,8 @@ bool StackPointerOpsRemove::removeDeadRegisterRestorePops()
 					restore->getPointerOperand());
 			auto* registerDestination = dyn_cast<GlobalVariable>(
 					restore->getPointerOperand());
-			bool isLocalizedRegister = false;
-			if (localDestination != nullptr)
-			{
-				for (auto* reg : _abi->getRegisters())
-				{
-					isLocalizedRegister |=
-							reg->getName() == localDestination->getName();
-				}
-			}
+			bool isLocalizedRegister =
+					isRegisterLocalizationAlloca(localDestination, _abi);
 			if (!isLocalizedRegister
 					&& (registerDestination == nullptr
 							|| !_abi->isRegister(registerDestination)))
