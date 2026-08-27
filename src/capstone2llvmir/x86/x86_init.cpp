@@ -797,7 +797,7 @@ Capstone2LlvmIrTranslatorX86_impl::_i2fm =
 		{X86_INS_FNSTSW, &Capstone2LlvmIrTranslatorX86_impl::translateFnstsw},
 		{X86_INS_FPATAN, &Capstone2LlvmIrTranslatorX86_impl::translateFatan},
 		{X86_INS_FPREM, &Capstone2LlvmIrTranslatorX86_impl::translateFprem},
-		{X86_INS_FPREM1, &Capstone2LlvmIrTranslatorX86_impl::translateFprem},
+		{X86_INS_FPREM1, &Capstone2LlvmIrTranslatorX86_impl::translateFprem1},
 		{X86_INS_FPTAN, &Capstone2LlvmIrTranslatorX86_impl::translateFtan},
 		{X86_INS_FFREEP, nullptr},
 		{X86_INS_FRNDINT, &Capstone2LlvmIrTranslatorX86_impl::translateFrndint},

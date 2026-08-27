@@ -6,6 +6,8 @@
 
 #include <iomanip>
 
+#include <llvm/IR/InlineAsm.h>
+
 #include "capstone2llvmir/x86/x86_impl.h"
 
 namespace retdec {
@@ -2849,6 +2851,51 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(
 }
 
 /**
+ * X86_INS_FPREM1
+ *
+ * Execute the native x87 remainder operation on virtual ST(0)/ST(1), and copy
+ * both the result and all four condition-code bits back into the virtual FPU
+ * state.  Native lowering preserves the implementation-selected partial
+ * reduction exactly; software can therefore repeat while C2 is set just as it
+ * does around the original instruction.
+ */
+void Capstone2LlvmIrTranslatorX86_impl::translateFprem1(
+		cs_insn* i,
+		cs_x86* xi,
+		llvm::IRBuilder<>& irb)
+{
+	EXPECT_IS_NULLARY(i, xi, irb);
+
+	auto* top = loadX87Top(irb);
+	auto* next = irb.CreateAdd(top, llvm::ConstantInt::get(top->getType(), 1));
+	auto* dividend = loadX87DataReg(irb, top);
+	auto* divisor = loadX87DataReg(irb, next);
+	auto* resultType = llvm::StructType::get(
+			_module->getContext(), {dividend->getType(), irb.getInt16Ty()});
+	auto* functionType = llvm::FunctionType::get(
+			resultType, {dividend->getType(), divisor->getType()}, false);
+	auto* fprem1 = llvm::InlineAsm::get(
+			functionType,
+			"fprem1; fnstsw $1",
+			"={st},={ax},0,{st(1)},~{fpsr},~{flags}",
+			true);
+	auto* result = irb.CreateCall(fprem1, {dividend, divisor});
+	auto* remainder = irb.CreateExtractValue(result, 0);
+	auto* status = irb.CreateExtractValue(result, 1);
+	storeX87DataReg(irb, top, remainder);
+
+	for (const auto& field : std::vector<std::pair<unsigned, unsigned>>{
+			{X87_REG_C0, 8},
+			{X87_REG_C1, 9},
+			{X87_REG_C2, 10},
+			{X87_REG_C3, 14}})
+	{
+		auto* bit = irb.CreateTrunc(irb.CreateLShr(status, field.second), irb.getInt1Ty());
+		storeRegister(field.first, bit, irb);
+	}
+}
+
+/**
  * X86_INS_NOT
  */
 void Capstone2LlvmIrTranslatorX86_impl::translateNot(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb)
@@ -4826,7 +4873,9 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFcos(cs_insn* i, cs_x86* xi, ll
 	llvm::IRBuilder<>& bodyIf(irbP.first), bodyElse(irbP.second);
 
 	storeRegister(X87_REG_C2, bodyIf.getFalse(), bodyIf);
-	auto* cos = llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::cos, op0->getType());
+	auto* cosType = llvm::FunctionType::get(op0->getType(), {op0->getType()}, false);
+	auto* cos = llvm::InlineAsm::get(
+			cosType, "fcos", "={st},0,~{fpsr},~{flags}", true);
 	auto* cosCall = bodyIf.CreateCall(cos, {op0});
 	storeX87DataReg(bodyIf, top, cosCall);
 
@@ -4851,11 +4900,15 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFsincos(cs_insn* i, cs_x86* xi,
 	llvm::IRBuilder<>& bodyIf(irbP.first), bodyElse(irbP.second);
 
 	storeRegister(X87_REG_C2, bodyIf.getFalse(), bodyIf);
-	auto* sin = llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::sin, op0->getType());
+	auto* sinType = llvm::FunctionType::get(op0->getType(), {op0->getType()}, false);
+	auto* sin = llvm::InlineAsm::get(
+			sinType, "fsin", "={st},0,~{fpsr},~{flags}", true);
 	auto* sinCall = bodyIf.CreateCall(sin, {op0});
 	storeX87DataReg(bodyIf, top, sinCall);
 
-	auto* cos = llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::cos, op0->getType());
+	auto* cosType = llvm::FunctionType::get(op0->getType(), {op0->getType()}, false);
+	auto* cos = llvm::InlineAsm::get(
+			cosType, "fcos", "={st},0,~{fpsr},~{flags}", true);
 	auto* cosCall = bodyIf.CreateCall(cos, {op0});
 	auto* nTop = x87DecTop(bodyIf, top);
 	storeX87DataReg(bodyIf, nTop, cosCall);
@@ -4881,7 +4934,9 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFsin(cs_insn* i, cs_x86* xi, ll
 	llvm::IRBuilder<>& bodyIf(irbP.first), bodyElse(irbP.second);
 
 	storeRegister(X87_REG_C2, bodyIf.getFalse(), bodyIf);
-	auto* sin = llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::sin, op0->getType());
+	auto* sinType = llvm::FunctionType::get(op0->getType(), {op0->getType()}, false);
+	auto* sin = llvm::InlineAsm::get(
+			sinType, "fsin", "={st},0,~{fpsr},~{flags}", true);
 	auto* sinCall = bodyIf.CreateCall(sin, {op0});
 	storeX87DataReg(bodyIf, top, sinCall);
 

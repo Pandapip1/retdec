@@ -5,8 +5,12 @@
  */
 
 #include <cmath>
+#include <set>
+#include <string>
+#include <vector>
 
 #include <llvm/IR/InstIterator.h>
+#include <llvm/IR/InlineAsm.h>
 
 #include "capstone2llvmir/capstone2llvmir_tests.h"
 #include "retdec/capstone2llvmir/x86/x86.h"
@@ -11096,6 +11100,55 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOMP_FNSTSW_status_dependency
 	EXPECT_EQ(0x1900, getRegisterValueUnsigned(X86_REG_AX));
 }
 
+// D9 F5  FPREM1  IEEE remainder with quotient bits in C0/C3/C1.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPREM1_native_status_and_remainder)
+{
+	ALL_MODES;
+	auto* translated = translate("fprem1");
+
+	auto calls = getInlineAsmCalls(translated);
+	ASSERT_EQ(1, calls.size());
+	EXPECT_EQ("fprem1; fnstsw $1", calls[0]->getAsmString());
+	EXPECT_EQ("={st},={ax},0,{st(1)},~{fpsr},~{flags}",
+			calls[0]->getConstraintString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
+
+	auto* resultType = llvm::dyn_cast<llvm::StructType>(
+			calls[0]->getFunctionType()->getReturnType());
+	ASSERT_NE(nullptr, resultType);
+	ASSERT_EQ(2, resultType->getNumElements());
+	EXPECT_TRUE(resultType->getElementType(0)->isX86_FP80Ty());
+	EXPECT_TRUE(resultType->getElementType(1)->isIntegerTy(16));
+
+	bool extractsRemainder = false;
+	bool extractsStatus = false;
+	std::set<std::string> statusStores;
+	for (auto& instruction : llvm::instructions(translated))
+	{
+		if (auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(&instruction))
+		{
+			extractsRemainder |= extract->getIndices()[0] == 0;
+			extractsStatus |= extract->getIndices()[0] == 1;
+		}
+		if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+		{
+			if (auto* global = llvm::dyn_cast<llvm::GlobalVariable>(
+					store->getPointerOperand()->stripPointerCasts()))
+			{
+				if (global->getName().startswith("fpu_stat_C"))
+				{
+					statusStores.insert(global->getName().str());
+				}
+			}
+		}
+	}
+	EXPECT_TRUE(extractsRemainder);
+	EXPECT_TRUE(extractsStatus);
+	EXPECT_EQ((std::set<std::string>{
+			"fpu_stat_C0", "fpu_stat_C1", "fpu_stat_C2", "fpu_stat_C3"}),
+			statusStores);
+}
+
 //
 // X86_INS_FTST
 //
@@ -12691,24 +12744,11 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FXCH_st3)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 {
 	ALL_MODES;
-
-	setRegisters({
-		{X87_REG_TOP, 0x1},
-		{X86_REG_ST1, 10.0}, // st(0)
-	});
-
-	emulate("fcos");
-
-	EXPECT_JUST_REGISTERS_LOADED({X87_REG_TOP, X86_REG_ST1});
-	EXPECT_JUST_REGISTERS_STORED({
-		{X86_REG_ST1, ANY},
-		{X87_REG_C2, false},
-	});
-	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_VALUES_CALLED({
-		{_module.getFunction("llvm.fabs.f80"), {10.0}},
-		{_module.getFunction("cosl"), {10.0}},
-	});
+	auto calls = getInlineAsmCalls(translate("fcos"));
+	ASSERT_EQ(1, calls.size());
+	EXPECT_EQ("fcos", calls[0]->getAsmString());
+	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
 }
 
 //
@@ -12719,24 +12759,11 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 {
 	ALL_MODES;
-
-	setRegisters({
-		{X87_REG_TOP, 0x1},
-		{X86_REG_ST1, 10.0},
-	});
-
-	emulate("fsin");
-
-	EXPECT_JUST_REGISTERS_LOADED({X87_REG_TOP, X86_REG_ST1});
-	EXPECT_JUST_REGISTERS_STORED({
-		{X86_REG_ST1, ANY},
-		{X87_REG_C2, false},
-	});
-	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_VALUES_CALLED({
-		{_module.getFunction("llvm.fabs.f80"), {10.0}},
-		{_module.getFunction("sinl"), {10.0}},
-	});
+	auto calls = getInlineAsmCalls(translate("fsin"));
+	ASSERT_EQ(1, calls.size());
+	EXPECT_EQ("fsin", calls[0]->getAsmString());
+	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
 }
 
 //
@@ -12748,27 +12775,12 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSINCOS_compute)
 {
 	ALL_MODES;
-
-	setRegisters({
-		{X87_REG_TOP, 0x1},
-		{X86_REG_ST1, 10.0},
-	});
-
-	emulate("fsincos");
-
-	EXPECT_JUST_REGISTERS_LOADED({X87_REG_TOP, X86_REG_ST1});
-	EXPECT_JUST_REGISTERS_STORED({
-		{X86_REG_ST1, ANY},
-		{X86_REG_ST0, ANY},
-		{X87_REG_TOP, 0x0},
-		{X87_REG_C2, false},
-	});
-	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_VALUES_CALLED({
-		{_module.getFunction("llvm.fabs.f80"), {10.0}},
-		{_module.getFunction("sinl"), {10.0}},
-		{_module.getFunction("cosl"), {10.0}},
-	});
+	auto calls = getInlineAsmCalls(translate("fsincos"));
+	ASSERT_EQ(2, calls.size());
+	EXPECT_EQ("fsin", calls[0]->getAsmString());
+	EXPECT_EQ("fcos", calls[1]->getAsmString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
+	EXPECT_TRUE(calls[1]->hasSideEffects());
 }
 
 //
