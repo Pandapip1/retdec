@@ -50,6 +50,11 @@ class Collector
 			llvm::Instruction* i,
 			std::vector<llvm::StoreInst*>& stores) const;
 
+		void collectX86CallArgs(CallEntry* ce) const;
+		unsigned getX86CleanupBytes(
+			llvm::CallInst* call,
+			std::vector<llvm::StoreInst*>* cleanupMarkers = nullptr) const;
+
 		void collectLoadsAfterInstruction(
 			llvm::Instruction* i,
 			std::vector<llvm::LoadInst*>& loads) const;

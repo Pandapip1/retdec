@@ -45,7 +45,7 @@ bool Abi::isRegister(const llvm::Value* val, uint32_t r) const
 	return getRegister(r) == val;
 }
 
-bool Abi::isFlagRegister(const llvm::Value* val)
+bool Abi::isFlagRegister(const llvm::Value* val) const
 {
 	return isRegister(val)
 			&& val->getType()->getPointerElementType()->isIntegerTy(1);

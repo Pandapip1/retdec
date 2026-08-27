@@ -42,7 +42,7 @@ class Abi
 	public:
 		bool isRegister(const llvm::Value* val) const;
 		bool isRegister(const llvm::Value* val, uint32_t r) const;
-		bool isFlagRegister(const llvm::Value* val);
+		bool isFlagRegister(const llvm::Value* val) const;
 		bool isStackPointerRegister(const llvm::Value* val) const;
 		bool isZeroRegister(const llvm::Value* val);
 		virtual bool isGeneralPurposeRegister(const llvm::Value* val) const = 0;

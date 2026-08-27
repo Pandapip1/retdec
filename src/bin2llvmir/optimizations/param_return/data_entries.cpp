@@ -4,6 +4,7 @@
 * @copyright (c) 2019 Avast Software, licensed under the MIT license
 */
 
+#include <algorithm>
 #include <set>
 
 #include "retdec/bin2llvmir/optimizations/param_return/data_entries.h"
@@ -295,13 +296,23 @@ void CallEntry::setArgStores(std::vector<llvm::StoreInst*>&& stores)
 {
 	_argStores = std::move(stores);
 
-	std::set<llvm::Value*> vals;
-	for (auto& i : _argStores)
+	if (_directArgStores.empty() && !_preserveNativeStackOrder)
 	{
-		vals.insert(i->getPointerOperand());
+		std::set<llvm::Value*> vals;
+		for (auto& i : _argStores)
+		{
+			vals.insert(i->getPointerOperand());
+		}
+		_args.assign(vals.begin(), vals.end());
+		return;
 	}
 
-	_args.assign(vals.begin(), vals.end());
+	_args.clear();
+	for (auto* store : _argStores)
+	{
+		_args.push_back(_directArgStores.count(store) != 0
+				? store->getValueOperand() : store->getPointerOperand());
+	}
 }
 
 void CallEntry::setArgs(std::vector<Value*>&& args)
@@ -310,16 +321,69 @@ void CallEntry::setArgs(std::vector<Value*>&& args)
 		std::remove_if(
 			_argStores.begin(),
 			_argStores.end(),
-			[args](StoreInst* st)
+			[this, args](StoreInst* st)
 			{
-				auto* op = st->getPointerOperand();
+				auto* op = _directArgStores.count(st) != 0
+						? st->getValueOperand() : st->getPointerOperand();
 				return std::find(
 					args.begin(),
 					args.end(), op) == args.end();
 			}),
 		_argStores.end());
 
+	auto wasRetained = [this](StoreInst* store)
+	{
+		return std::find(_argStores.begin(), _argStores.end(), store)
+				!= _argStores.end();
+	};
+	for (auto it = _directArgStores.begin(); it != _directArgStores.end(); )
+	{
+		if (wasRetained(*it))
+		{
+			++it;
+		}
+		else
+		{
+			it = _directArgStores.erase(it);
+		}
+	}
+	for (auto it = _provenStackArgStores.begin();
+			it != _provenStackArgStores.end(); )
+	{
+		if (wasRetained(*it))
+		{
+			++it;
+		}
+		else
+		{
+			it = _provenStackArgStores.erase(it);
+		}
+	}
+
 	_args = std::move(args);
+}
+
+void CallEntry::addDirectArgStore(StoreInst* store)
+{
+	_directArgStores.insert(store);
+}
+
+void CallEntry::addProvenStackArgStore(StoreInst* store)
+{
+	_provenStackArgStores.insert(store);
+}
+
+void CallEntry::addObsoleteStackCleanupMarker(StoreInst* marker)
+{
+	if (marker != nullptr)
+	{
+		_obsoleteStackCleanupMarkers.push_back(marker);
+	}
+}
+
+void CallEntry::preserveNativeStackOrder(bool preserve)
+{
+	_preserveNativeStackOrder = preserve;
 }
 
 void CallEntry::setRetLoads(std::vector<LoadInst*>&& loads)
@@ -369,6 +433,37 @@ std::string CallEntry::getFormatString() const
 const std::vector<llvm::StoreInst*>& CallEntry::argStores() const
 {
 	return _argStores;
+}
+
+const std::set<StoreInst*>& CallEntry::directArgStores() const
+{
+	return _directArgStores;
+}
+
+const std::set<StoreInst*>& CallEntry::provenStackArgStores() const
+{
+	return _provenStackArgStores;
+}
+
+const std::vector<StoreInst*>& CallEntry::obsoleteStackCleanupMarkers() const
+{
+	return _obsoleteStackCleanupMarkers;
+}
+
+bool CallEntry::isDirectArgument(const Value* value) const
+{
+	return std::any_of(
+		_directArgStores.begin(),
+		_directArgStores.end(),
+		[value](const StoreInst* store)
+		{
+			return store->getValueOperand() == value;
+		});
+}
+
+bool CallEntry::preservesNativeStackOrder() const
+{
+	return _preserveNativeStackOrder;
 }
 
 const std::vector<Value*>& CallEntry::retValues() const

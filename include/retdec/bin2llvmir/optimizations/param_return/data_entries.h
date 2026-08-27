@@ -7,6 +7,7 @@
 #ifndef RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PARAM_RETURN_DATA_ENTRIES_H
 #define RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PARAM_RETURN_DATA_ENTRIES_H
 
+#include <set>
 #include <vector>
 
 #include "retdec/bin2llvmir/providers/calling_convention/calling_convention.h"
@@ -126,6 +127,11 @@ class CallEntry : public CallableEntry
 		void setRetLoads(std::vector<llvm::LoadInst*>&& loads);
 		void setRetValues(std::vector<llvm::Value*>&& values);
 
+		void addDirectArgStore(llvm::StoreInst* store);
+		void addProvenStackArgStore(llvm::StoreInst* store);
+		void addObsoleteStackCleanupMarker(llvm::StoreInst* marker);
+		void preserveNativeStackOrder(bool preserve = true);
+
 		llvm::CallInst* getCallInstruction() const;
 		const FunctionEntry* getBaseFunction() const;
 		std::string getFormatString() const;
@@ -134,6 +140,11 @@ class CallEntry : public CallableEntry
 		const std::vector<llvm::StoreInst*>& argStores() const;
 		const std::vector<llvm::Value*>& retValues() const;
 		const std::vector<llvm::LoadInst*>& retLoads() const;
+		const std::set<llvm::StoreInst*>& directArgStores() const;
+		const std::set<llvm::StoreInst*>& provenStackArgStores() const;
+		const std::vector<llvm::StoreInst*>& obsoleteStackCleanupMarkers() const;
+		bool isDirectArgument(const llvm::Value* value) const;
+		bool preservesNativeStackOrder() const;
 
 	private:
 		const FunctionEntry* _baseFunction;
@@ -144,6 +155,10 @@ class CallEntry : public CallableEntry
 		std::vector<llvm::LoadInst*> _retLoads;
 		std::vector<llvm::Value*> _retValues;
 		std::vector<llvm::StoreInst*> _argStores;
+		std::set<llvm::StoreInst*> _directArgStores;
+		std::set<llvm::StoreInst*> _provenStackArgStores;
+		std::vector<llvm::StoreInst*> _obsoleteStackCleanupMarkers;
+		bool _preserveNativeStackOrder = false;
 };
 
 class DataFlowEntry : public FunctionEntry

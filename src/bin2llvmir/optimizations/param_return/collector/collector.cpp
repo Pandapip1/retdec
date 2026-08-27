@@ -4,13 +4,18 @@
 * @copyright (c) 2019 Avast Software, licensed under the MIT license
 */
 
+#include <algorithm>
+#include <limits>
 #include <queue>
+#include <set>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/InstIterator.h>
 
 #include "retdec/bin2llvmir/optimizations/param_return/collector/collector.h"
 #include "retdec/bin2llvmir/optimizations/param_return/collector/pic32.h"
+#include "retdec/bin2llvmir/providers/asm_instruction.h"
+#include "retdec/bin2llvmir/utils/llvm.h"
 
 using namespace llvm;
 
@@ -29,6 +34,12 @@ Collector::Collector(
 
 void Collector::collectCallArgs(CallEntry* ce) const
 {
+	if (_abi->getConfig()->getConfig().architecture.isX86_32())
+	{
+		collectX86CallArgs(ce);
+		return;
+	}
+
 	std::vector<llvm::StoreInst*> foundStores;
 
 	collectStoresBeforeInstruction(
@@ -36,6 +47,498 @@ void Collector::collectCallArgs(CallEntry* ce) const
 		foundStores);
 
 	ce->setArgStores(std::move(foundStores));
+}
+
+unsigned Collector::getX86CleanupBytes(
+		CallInst* call,
+		std::vector<StoreInst*>* cleanupMarkers) const
+{
+	unsigned bytes = 0;
+	auto* config = _abi->getConfig();
+	auto callAsm = AsmInstruction(call);
+	auto* callBlock = callAsm.getBasicBlock();
+	auto cleanupAsm = callAsm.getNext();
+	unsigned skippedInstructions = 0;
+
+	while (cleanupAsm.isValid())
+	{
+		auto* instruction = cleanupAsm.getCapstoneInsn();
+		if (instruction == nullptr || cleanupAsm.getBasicBlock() != callBlock)
+		{
+			break;
+		}
+		if (instruction->id == X86_INS_POP)
+		{
+			if (cleanupMarkers != nullptr)
+			{
+				cleanupMarkers->push_back(cleanupAsm.getLlvmToAsmInstruction());
+			}
+			unsigned slotSize = config->getConfig().architecture.getByteSize();
+			if (slotSize == 0
+					|| slotSize > std::numeric_limits<unsigned>::max() - bytes)
+			{
+				break;
+			}
+			bytes += slotSize;
+			cleanupAsm = cleanupAsm.getNext();
+			continue;
+		}
+		if (instruction->id == X86_INS_ADD && instruction->detail != nullptr)
+		{
+			auto& x86 = instruction->detail->x86;
+			if (x86.op_count == 2
+					&& x86.operands[0].type == X86_OP_REG
+					&& (x86.operands[0].reg == X86_REG_SP
+							|| x86.operands[0].reg == X86_REG_ESP
+							|| x86.operands[0].reg == X86_REG_RSP)
+					&& x86.operands[1].type == X86_OP_IMM
+					&& x86.operands[1].imm > 0
+					&& static_cast<uint64_t>(x86.operands[1].imm)
+							<= std::numeric_limits<unsigned>::max() - bytes)
+			{
+				bytes += static_cast<unsigned>(x86.operands[1].imm);
+				if (cleanupMarkers != nullptr)
+				{
+					cleanupMarkers->push_back(cleanupAsm.getLlvmToAsmInstruction());
+				}
+			}
+		}
+		if (bytes != 0)
+		{
+			break;
+		}
+
+		bool stackPointerOperand = false;
+		if (instruction->detail != nullptr)
+		{
+			auto& x86 = instruction->detail->x86;
+			for (unsigned operand = 0; operand < x86.op_count; ++operand)
+			{
+				auto& op = x86.operands[operand];
+				stackPointerOperand |= op.type == X86_OP_REG
+						&& (op.reg == X86_REG_SP || op.reg == X86_REG_ESP
+								|| op.reg == X86_REG_RSP);
+				stackPointerOperand |= op.type == X86_OP_MEM
+						&& (op.mem.base == X86_REG_SP || op.mem.base == X86_REG_ESP
+								|| op.mem.base == X86_REG_RSP
+								|| op.mem.index == X86_REG_SP
+								|| op.mem.index == X86_REG_ESP
+								|| op.mem.index == X86_REG_RSP);
+			}
+		}
+		bool controlFlow = instruction->id == X86_INS_CALL
+				|| instruction->id == X86_INS_LCALL
+				|| instruction->id == X86_INS_JMP
+				|| instruction->id == X86_INS_LJMP
+				|| instruction->id == X86_INS_RET
+				|| instruction->id == X86_INS_RETF
+				|| instruction->id == X86_INS_RETFQ;
+		if (instruction->detail != nullptr)
+		{
+			for (unsigned group = 0; group < instruction->detail->groups_count; ++group)
+			{
+				auto id = instruction->detail->groups[group];
+				controlFlow |= id == CS_GRP_JUMP || id == CS_GRP_CALL
+						|| id == CS_GRP_RET;
+			}
+		}
+		if (stackPointerOperand || controlFlow || instruction->id == X86_INS_PUSH
+				|| instruction->id == X86_INS_LEAVE || ++skippedInstructions > 8)
+		{
+			break;
+		}
+		cleanupAsm = cleanupAsm.getNext();
+	}
+
+	// Stack analysis can fold the restored value to a frame pointer.  Retain a
+	// conventional LLVM ESP += constant fallback when machine metadata supplied
+	// no bound.
+	for (auto* next = bytes == 0 ? call->getNextNode() : nullptr;
+			next != nullptr; next = next->getNextNode())
+	{
+		if (auto* nextCall = dyn_cast<CallInst>(next))
+		{
+			auto* called = nextCall->getCalledFunction();
+			if (called == nullptr || !called->isIntrinsic())
+			{
+				break;
+			}
+		}
+		auto* store = dyn_cast<StoreInst>(next);
+		if (store == nullptr || !_abi->isStackPointerRegister(store->getPointerOperand()))
+		{
+			continue;
+		}
+		auto* stackPointer = store->getPointerOperand();
+		auto* addition = dyn_cast<BinaryOperator>(
+				llvm_utils::skipCasts(store->getValueOperand()));
+		if (addition == nullptr || addition->getOpcode() != Instruction::Add)
+		{
+			continue;
+		}
+		for (unsigned operand = 0; operand < 2; ++operand)
+		{
+			auto* amount = dyn_cast<ConstantInt>(addition->getOperand(operand));
+			auto* load = dyn_cast<LoadInst>(llvm_utils::skipCasts(
+					addition->getOperand(1 - operand)));
+			if (amount != nullptr && amount->getSExtValue() > 0
+					&& load != nullptr && load->getPointerOperand() == stackPointer)
+			{
+				bytes = amount->getZExtValue();
+				break;
+			}
+		}
+		if (bytes != 0)
+		{
+			break;
+		}
+	}
+	return bytes;
+}
+
+void Collector::collectX86CallArgs(CallEntry* ce) const
+{
+	auto* call = ce->getCallInstruction();
+	auto* config = _abi->getConfig();
+	std::vector<StoreInst*> cleanupMarkers;
+	unsigned cleanupBytes = getX86CleanupBytes(call, &cleanupMarkers);
+	for (auto* marker : cleanupMarkers)
+	{
+		ce->addObsoleteStackCleanupMarker(marker);
+	}
+
+	std::vector<StoreInst*> stores;
+	std::set<StoreInst*> directStores;
+	std::set<StoreInst*> provenStores;
+	std::set<Value*> disqualifiedValues;
+	Value* pendingStackPointer = nullptr;
+	unsigned nestedCleanupBytes = 0;
+	uint64_t recoveredStackBytes = 0;
+	uint64_t overwrittenReservationBytes = 0;
+	AsmInstruction overwrittenReservationAsm;
+	unsigned slotSize = config->getConfig().architecture.getByteSize();
+	auto* block = call->getParent();
+	Instruction* previous = call;
+	std::set<BasicBlock*> seen{block};
+
+	while (true)
+	{
+		if (previous == &block->front())
+		{
+			auto* predecessor = block->getSinglePredecessor();
+			if (predecessor == nullptr || predecessor->empty()
+					|| predecessor == block || seen.count(predecessor) != 0)
+			{
+				break;
+			}
+			block = predecessor;
+			previous = &block->back();
+			seen.insert(block);
+		}
+		else
+		{
+			previous = previous->getPrevNode();
+		}
+		if (previous == nullptr)
+		{
+			break;
+		}
+
+		if (overwrittenReservationBytes != 0 && overwrittenReservationAsm.isValid())
+		{
+			AsmInstruction currentAsm(previous);
+			if (currentAsm.isValid()
+					&& currentAsm.getLlvmToAsmInstruction()
+							!= overwrittenReservationAsm.getLlvmToAsmInstruction())
+			{
+				auto* instruction = currentAsm.getCapstoneInsn();
+				bool x87Producer = instruction != nullptr
+						&& (instruction->id == X86_INS_FLD
+								|| instruction->id == X86_INS_FLD1
+								|| instruction->id == X86_INS_FLDZ
+								|| instruction->id == X86_INS_FLDPI
+								|| instruction->id == X86_INS_FLDL2E
+								|| instruction->id == X86_INS_FLDL2T
+								|| instruction->id == X86_INS_FLDLG2
+								|| instruction->id == X86_INS_FLDLN2);
+				if (instruction == nullptr
+						|| (instruction->id != X86_INS_PUSH && !x87Producer)
+						|| currentAsm.getEndAddress()
+								!= overwrittenReservationAsm.getAddress())
+				{
+					overwrittenReservationBytes = 0;
+					overwrittenReservationAsm = AsmInstruction();
+				}
+				else if (x87Producer)
+				{
+					overwrittenReservationAsm = currentAsm;
+				}
+			}
+		}
+
+		if (auto* priorCall = dyn_cast<CallInst>(previous))
+		{
+			overwrittenReservationBytes = 0;
+			overwrittenReservationAsm = AsmInstruction();
+			auto* called = priorCall->getCalledFunction();
+			if (called == nullptr || !called->isIntrinsic())
+			{
+				unsigned nestedBytes = getX86CleanupBytes(priorCall, nullptr);
+				if (!_abi->getConfig()->getConfig().architecture.isX86_32()
+						|| cleanupBytes == 0 || slotSize == 0
+						|| nestedBytes == 0 || nestedBytes % slotSize != 0
+						|| nestedBytes > std::numeric_limits<unsigned>::max()
+								- nestedCleanupBytes)
+				{
+					break;
+				}
+				nestedCleanupBytes += nestedBytes;
+				pendingStackPointer = nullptr;
+				continue;
+			}
+			continue;
+		}
+
+		auto* store = dyn_cast<StoreInst>(previous);
+		if (store == nullptr)
+		{
+			continue;
+		}
+		auto* value = store->getValueOperand();
+		auto* pointer = store->getPointerOperand();
+		bool unresolvedPush = false;
+		bool unresolvedStackBlock = false;
+		if (_abi->isStackPointerRegister(pointer))
+		{
+			pendingStackPointer = llvm_utils::skipCasts(value);
+		}
+		else if (pendingStackPointer != nullptr)
+		{
+			unresolvedPush = llvm_utils::skipCasts(pointer) == pendingStackPointer;
+			pendingStackPointer = nullptr;
+		}
+
+		AsmInstruction asmInstruction(store);
+		auto* capstone = asmInstruction.isValid()
+				? asmInstruction.getCapstoneInsn() : nullptr;
+		bool decodedPush = capstone != nullptr && capstone->id == X86_INS_PUSH;
+		bool decodedWideStackStore = capstone != nullptr
+				&& (capstone->id == X86_INS_FST || capstone->id == X86_INS_FSTP)
+				&& _abi->isStackVariable(pointer) && value->getType()->isSized()
+				&& slotSize != 0
+				&& _module->getDataLayout().getTypeStoreSize(value->getType()) > slotSize;
+		if (decodedPush && cleanupBytes != 0
+				&& !AsmInstruction::isLlvmToAsmInstruction(store)
+				&& !_abi->isStackPointerRegister(pointer)
+				&& !_abi->isStackVariable(pointer) && !_abi->isRegister(pointer))
+		{
+			unresolvedPush = true;
+		}
+		if (!decodedPush && !unresolvedPush && cleanupBytes != 0
+				&& value->getType()->isSized())
+		{
+			auto* address = llvm_utils::skipCasts(pointer);
+			auto* stackLoad = dyn_cast<LoadInst>(address);
+			unresolvedStackBlock = stackLoad != nullptr
+					&& _abi->isStackPointerRegister(stackLoad->getPointerOperand())
+					&& _module->getDataLayout().getTypeStoreSize(value->getType())
+							<= cleanupBytes;
+		}
+
+		if (overwrittenReservationBytes != 0 && decodedPush
+				&& !AsmInstruction::isLlvmToAsmInstruction(store)
+				&& !_abi->isStackPointerRegister(pointer)
+				&& (unresolvedPush || _abi->isStackVariable(pointer)))
+		{
+			if (slotSize > overwrittenReservationBytes)
+			{
+				break;
+			}
+			overwrittenReservationBytes -= slotSize;
+			overwrittenReservationAsm = asmInstruction;
+			continue;
+		}
+
+		if (!unresolvedPush && !unresolvedStackBlock
+				&& !_abi->isStackVariable(pointer) && !_abi->isRegister(pointer))
+		{
+			disqualifiedValues.insert(pointer);
+		}
+		if (auto* load = dyn_cast<LoadInst>(value))
+		{
+			if (load->getPointerOperand()->getName() == "ebp"
+					|| load->getPointerOperand()->getName() == "rbp")
+			{
+				if (cleanupBytes == 0 || (!decodedPush && !unresolvedPush))
+				{
+					disqualifiedValues.insert(pointer);
+				}
+			}
+			if (_abi->isRegister(pointer)
+					&& _abi->isRegister(load->getPointerOperand())
+					&& pointer != load->getPointerOperand())
+			{
+				disqualifiedValues.insert(load->getPointerOperand());
+			}
+		}
+
+		if (disqualifiedValues.count(pointer) != 0 || _abi->isFlagRegister(pointer)
+				|| (!isa<AllocaInst>(pointer) && !_abi->isRegister(pointer)
+						&& !unresolvedPush && !unresolvedStackBlock))
+		{
+			continue;
+		}
+
+		uint64_t stackBytes = 0;
+		bool stackArgument = _abi->isStackVariable(pointer)
+				|| unresolvedPush || unresolvedStackBlock;
+		bool decodedStackEffect = decodedPush || unresolvedPush
+				|| unresolvedStackBlock || decodedWideStackStore;
+		if (stackArgument && decodedStackEffect && slotSize != 0)
+		{
+			uint64_t valueBytes = value->getType()->isSized()
+					? _module->getDataLayout().getTypeStoreSize(value->getType())
+					: slotSize;
+			stackBytes = decodedPush || unresolvedPush ? slotSize
+					: std::max<uint64_t>(slotSize,
+							((valueBytes + slotSize - 1) / slotSize) * slotSize);
+		}
+		if ((unresolvedStackBlock || decodedWideStackStore) && stackBytes != 0)
+		{
+			overwrittenReservationBytes += stackBytes;
+			overwrittenReservationAsm = asmInstruction;
+		}
+		else if (overwrittenReservationBytes != 0
+				&& stackArgument && !decodedStackEffect)
+		{
+			overwrittenReservationBytes = 0;
+			overwrittenReservationAsm = AsmInstruction();
+		}
+
+		if (nestedCleanupBytes != 0)
+		{
+			if (stackBytes != 0)
+			{
+				if (stackBytes > nestedCleanupBytes)
+				{
+					break;
+				}
+				nestedCleanupBytes -= stackBytes;
+			}
+			continue;
+		}
+
+		stores.push_back(store);
+		if (stackArgument && decodedStackEffect)
+		{
+			provenStores.insert(store);
+		}
+		if ((unresolvedPush || unresolvedStackBlock) && !_abi->isStackVariable(pointer))
+		{
+			directStores.insert(store);
+		}
+		disqualifiedValues.insert(pointer);
+		disqualifiedValues.insert(store);
+
+		if (stackBytes != 0)
+		{
+			recoveredStackBytes += stackBytes;
+			if (cleanupBytes != 0 && recoveredStackBytes >= cleanupBytes)
+			{
+				auto previousAsm = asmInstruction.getPrev();
+				auto* previousCapstone = previousAsm.isValid()
+						? previousAsm.getCapstoneInsn() : nullptr;
+				bool adjacentPush = decodedPush && previousCapstone != nullptr
+						&& previousCapstone->id == X86_INS_PUSH
+						&& previousAsm.getEndAddress() == asmInstruction.getAddress();
+				if (!adjacentPush)
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	if (cleanupBytes != 0 && slotSize != 0)
+	{
+		auto candidateBytes = [&](StoreInst* store) -> uint64_t
+		{
+			bool stackArgument = _abi->isStackVariable(store->getPointerOperand())
+					|| directStores.count(store) != 0;
+			if (!stackArgument)
+			{
+				return 0;
+			}
+			auto instruction = AsmInstruction(store);
+			auto* decoded = instruction.isValid()
+					? instruction.getCapstoneInsn() : nullptr;
+			uint64_t valueBytes = decoded != nullptr && decoded->id == X86_INS_PUSH
+					? slotSize : _module->getDataLayout().getTypeStoreSize(
+							store->getValueOperand()->getType());
+			return std::max<uint64_t>(slotSize,
+					((valueBytes + slotSize - 1) / slotSize) * slotSize);
+		};
+		uint64_t provenBytes = 0;
+		for (auto* store : stores)
+		{
+			if (provenStores.count(store) != 0)
+			{
+				provenBytes += candidateBytes(store);
+			}
+		}
+		uint64_t uncertainBytes = 0;
+		uint64_t uncertainLimit = provenBytes < cleanupBytes
+				? cleanupBytes - provenBytes : 0;
+		auto it = stores.begin();
+		while (it != stores.end())
+		{
+			auto* store = *it;
+			uint64_t bytes = candidateBytes(store);
+			bool proven = provenStores.count(store) != 0;
+			if (!proven && bytes != 0 && uncertainBytes + bytes > uncertainLimit)
+			{
+				directStores.erase(store);
+				it = stores.erase(it);
+			}
+			else
+			{
+				if (!proven)
+				{
+					uncertainBytes += bytes;
+				}
+				++it;
+			}
+		}
+	}
+
+	bool hasStack = false;
+	bool allDecodedPushes = true;
+	for (auto* store : stores)
+	{
+		if (!_abi->isStackVariable(store->getPointerOperand())
+				&& directStores.count(store) == 0)
+		{
+			continue;
+		}
+		hasStack = true;
+		auto instruction = AsmInstruction(store);
+		auto* decoded = instruction.isValid() ? instruction.getCapstoneInsn() : nullptr;
+		allDecodedPushes &= decoded != nullptr && decoded->id == X86_INS_PUSH;
+	}
+	ce->preserveNativeStackOrder(!directStores.empty()
+			|| (hasStack && allDecodedPushes));
+	for (auto* store : directStores)
+	{
+		ce->addDirectArgStore(store);
+	}
+	for (auto* store : provenStores)
+	{
+		if (std::find(stores.begin(), stores.end(), store) != stores.end())
+		{
+			ce->addProvenStackArgStore(store);
+		}
+	}
+	ce->setArgStores(std::move(stores));
 }
 
 void Collector::collectCallRets(CallEntry* ce) const
