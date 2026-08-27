@@ -561,6 +561,19 @@ IrModifier::StackPair IrModifier::getStackVariable(
 	{
 		auto* csv = _config->getConfigStackVariable(ret);
 		assert(csv);
+		if (type->isSized() && ret->getAllocatedType()->isSized()
+				&& _module->getDataLayout().getTypeAllocSize(type)
+						> _module->getDataLayout().getTypeAllocSize(
+								ret->getAllocatedType()))
+		{
+			auto* old = ret;
+			ret = cast<AllocaInst>(changeObjectType(nullptr, ret, type));
+			csv->type.setLlvmIr(llvmObjToString(type));
+			if (old != ret && old->use_empty())
+			{
+				old->eraseFromParent();
+			}
+		}
 		return {ret, csv};
 	}
 
@@ -738,8 +751,10 @@ llvm::Value* IrModifier::changeObjectDeclarationType(
 		auto* ret = new AllocaInst(
 				toType,
 				Abi::DEFAULT_ADDR_SPACE,
+				alloca->getArraySize(),
 				alloca->getName(),
 				alloca);
+		ret->setAlignment(alloca->getAlignment());
 		ret->takeName(alloca);
 		return ret;
 	}
@@ -1156,6 +1171,10 @@ IrModifier::FunctionPair IrModifier::modifyFunction(
 	{
 		auto* a = &(*aIt);
 		auto* v = *asIt;
+		if (v == nullptr)
+		{
+			continue;
+		}
 
 		assert(v->getType()->isPointerTy());
 		auto* conv = IrModifier::convertValueToType(

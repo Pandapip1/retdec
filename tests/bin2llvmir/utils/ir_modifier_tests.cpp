@@ -284,6 +284,62 @@ TEST_F(IrModifierTests, modifyDirectCallFullModification)
 }
 
 //
+// changeObjectType
+//
+
+TEST_F(IrModifierTests, changeObjectTypePreservesAllocaArraySizeAndAlignment)
+{
+	parseInput(R"(
+		define void @fnc() {
+			%stack_array = alloca i32, i32 9, align 8
+			%address = ptrtoint i32* %stack_array to i32
+			ret void
+		}
+	)");
+	auto* stackArray = cast<AllocaInst>(getValueByName("stack_array"));
+	auto config = Config::empty(module.get());
+	IrModifier modifier(module.get(), &config);
+	auto* changed = cast<AllocaInst>(modifier.changeObjectType(
+			nullptr,
+			stackArray,
+			Type::getFloatTy(context)));
+
+	EXPECT_EQ(9u, cast<ConstantInt>(changed->getArraySize())->getZExtValue());
+	EXPECT_EQ(8u, changed->getAlignment());
+}
+
+TEST_F(IrModifierTests, getStackVariableWidensExistingAddressAnchor)
+{
+	parseInput(R"(
+		define void @fnc() {
+			ret void
+		}
+	)");
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("fnc");
+	config.getConfig().functions.insert(function);
+	IrModifier modifier(module.get(), &config);
+	auto* fnc = module->getFunction("fnc");
+
+	auto first = modifier.getStackVariable(
+			fnc, -40, Type::getInt32Ty(context));
+	ASSERT_TRUE(first.first->getAllocatedType()->isIntegerTy(32));
+	auto second = modifier.getStackVariable(
+			fnc, -40, Type::getDoubleTy(context));
+
+	EXPECT_TRUE(second.first->getAllocatedType()->isDoubleTy());
+	EXPECT_EQ("stack_var_-40", second.first->getName());
+	EXPECT_EQ(second.first, config.getLlvmStackVariable(fnc, -40));
+	EXPECT_EQ("double", second.second->type.getLlvmIr());
+	unsigned allocas = 0;
+	for (Instruction& instruction : fnc->getEntryBlock())
+	{
+		allocas += isa<AllocaInst>(instruction);
+	}
+	EXPECT_EQ(1u, allocas);
+}
+
+//
 // modifyFunction
 //
 
@@ -382,6 +438,38 @@ TEST_F(IrModifierTests, modifyFunctionWithZeroArguments)
 		}
 	)";
 	checkModuleAgainstExpectedIr(exp);
+}
+
+TEST_F(IrModifierTests, modifyFunctionAllowsSparseArgumentStorage)
+{
+	parseInput(R"(
+		define void @fnc() {
+			%first = alloca i32
+			%third = alloca i32
+			ret void
+		}
+	)");
+	auto* fnc = module->getFunction("fnc");
+	auto* first = cast<AllocaInst>(getValueByName("first"));
+	auto* third = cast<AllocaInst>(getValueByName("third"));
+	auto* i32 = Type::getInt32Ty(context);
+	auto config = Config::empty(module.get());
+	IrModifier modifier(module.get(), &config);
+	auto* changed = modifier.modifyFunction(
+			fnc,
+			Type::getVoidTy(context),
+			{i32, i32, i32},
+			false,
+			{},
+			{},
+			nullptr,
+			{first, nullptr, third}).first;
+
+	ASSERT_EQ(3u, changed->arg_size());
+	auto argument = changed->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	EXPECT_TRUE((argument++)->use_empty());
+	EXPECT_FALSE(argument->use_empty());
 }
 
 TEST_F(IrModifierTests, modifyFunctionWithExistingArguments)
