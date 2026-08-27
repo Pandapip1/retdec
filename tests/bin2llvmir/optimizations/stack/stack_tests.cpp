@@ -239,6 +239,47 @@ TEST_F(StackAnalysisTests, restoresConfiguredWidthBeforeCoalescingAdjacentObject
 	EXPECT_EQ(-28, config.getStackVariableOffset(secondMember).getValue());
 }
 
+TEST_F(StackAnalysisTests, coalescesOverlappingLocalViewsWithoutDynamicFrameTag)
+{
+	parseInput(R"(
+		define i8 @func(double %value) {
+			%whole = alloca double
+			%byte_view = alloca i8
+			store double %value, double* %whole
+			%byte = load i8, i8* %byte_view
+			store i8 %byte, i8* %byte_view
+			ret i8 %byte
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("func");
+	function.locals.insert(retdec::config::Object(
+			"whole", retdec::config::Storage::onStack(-16)));
+	function.locals.insert(retdec::config::Object(
+			"byte_view", retdec::config::Storage::onStack(-13)));
+	config.getConfig().functions.insert(function);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	EXPECT_NE(nullptr, getValueByName("stack_frame"));
+	LoadInst* byteLoad = nullptr;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		auto* load = dyn_cast<LoadInst>(&instruction);
+		if (load != nullptr && load->getType()->isIntegerTy(8))
+		{
+			byteLoad = load;
+		}
+	}
+	ASSERT_NE(nullptr, byteLoad);
+	EXPECT_EQ(-13, config.getStackVariableOffset(
+			byteLoad->getPointerOperand()).getValue());
+	EXPECT_FALSE(module->getFunction("func")->hasFnAttribute(
+			"retdec.stack.frame"));
+}
+
 TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)
 {
 	parseInput(R"(

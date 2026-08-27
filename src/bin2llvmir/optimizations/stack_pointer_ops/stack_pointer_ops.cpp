@@ -37,6 +37,54 @@ namespace {
 const char* STACK_FRAME_ATTRIBUTE = "retdec.stack.frame";
 const char* STACK_FRAME_METADATA = "retdec.stack.variable";
 
+bool hasOverlappingStackObjects(Module* module, Config* config, Function& function)
+{
+	struct Range
+	{
+		int64_t begin;
+		int64_t end;
+	};
+	std::vector<Range> ranges;
+	for (Instruction& instruction : function.getEntryBlock())
+	{
+		auto* alloca = dyn_cast<AllocaInst>(&instruction);
+		if (alloca == nullptr || !alloca->getAllocatedType()->isSized())
+		{
+			continue;
+		}
+		auto offset = config->getStackVariableOffset(alloca);
+		auto* elements = dyn_cast<ConstantInt>(alloca->getArraySize());
+		if (offset.isUndefined() || elements == nullptr)
+		{
+			continue;
+		}
+		uint64_t elementSize = module->getDataLayout().getTypeAllocSize(
+				alloca->getAllocatedType());
+		uint64_t count = elements->getZExtValue();
+		if (elementSize == 0
+				|| count > uint64_t(std::numeric_limits<int64_t>::max()) / elementSize)
+		{
+			continue;
+		}
+		int64_t begin = offset.getValue();
+		int64_t length = int64_t(elementSize * count);
+		if (begin > std::numeric_limits<int64_t>::max() - length)
+		{
+			continue;
+		}
+		int64_t end = begin + length;
+		for (const auto& range : ranges)
+		{
+			if (begin < range.end && range.begin < end)
+			{
+				return true;
+			}
+		}
+		ranges.push_back({begin, end});
+	}
+	return false;
+}
+
 /**
  * Put all recovered stack objects into one byte-addressable allocation after
  * parameter and type recovery have finished using independent allocas.
@@ -223,7 +271,10 @@ bool StackFrameCoalescing::run()
 	bool changed = false;
 	for (Function& function : *_module)
 	{
-		if (!function.empty() && function.hasFnAttribute(STACK_FRAME_ATTRIBUTE))
+		if (!function.empty()
+				&& (function.hasFnAttribute(STACK_FRAME_ATTRIBUTE)
+						|| hasOverlappingStackObjects(
+								_module, _config, function)))
 		{
 			changed |= coalesceStackFrame(_module, _config, function);
 		}
