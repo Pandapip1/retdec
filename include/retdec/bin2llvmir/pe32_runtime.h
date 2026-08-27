@@ -31,7 +31,15 @@ uint32_t retdec_pe32_register_host_function(
 /** Remove the region whose native base exactly matches @p host_base. */
 int retdec_pe32_unregister_host_object(void* host_base);
 
-/** Generated-code hook: translate/register a host pointer as a guest address. */
+/** Remove the region containing @p host_pointer. */
+int retdec_pe32_unregister_host_pointer(void* host_pointer);
+
+/**
+ * Generated-code hook: translate/register a host pointer as a guest address.
+ * A zero allocation_size discovers and registers the containing host virtual
+ * memory mapping.  Such an automatic mapping remains valid until explicitly
+ * removed with retdec_pe32_unregister_host_pointer() or process termination.
+ */
 uint32_t __retdec_pe32_host_to_guest(
 		void* pointer,
 		void* allocation_base,

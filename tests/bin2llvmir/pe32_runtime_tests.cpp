@@ -9,6 +9,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include "retdec/bin2llvmir/pe32_runtime.h"
@@ -117,6 +122,114 @@ TEST(Pe32RuntimeTests, TranslatesObjectsAndFunctionsInsideRegisteredSections)
 			__retdec_pe32_guest_to_host(guestBase + 64));
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(section.data()));
 }
+
+#if defined(__linux__)
+TEST(Pe32RuntimeTests,
+		AutomaticallyRegistersOneMappingForPointersAndDerivedOffsets)
+{
+	const long pageSize = sysconf(_SC_PAGESIZE);
+	ASSERT_GT(pageSize, 0);
+	auto* mapping = static_cast<uint8_t*>(mmap(
+			nullptr,
+			static_cast<size_t>(pageSize) * 2,
+			PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS,
+			-1,
+			0));
+	ASSERT_NE(MAP_FAILED, mapping);
+	if (sizeof(uintptr_t) > sizeof(uint32_t)
+			&& reinterpret_cast<uintptr_t>(mapping) <= UINT32_MAX)
+	{
+		munmap(mapping, static_cast<size_t>(pageSize) * 2);
+		GTEST_SKIP() << "host did not provide a high virtual address";
+	}
+
+	auto* first = mapping + 17;
+	auto* second = mapping + pageSize + 29;
+	const uint32_t firstGuest = __retdec_pe32_host_to_guest(first, first, 0);
+	const uint32_t secondGuest = __retdec_pe32_host_to_guest(second, second, 0);
+	ASSERT_NE(0u, firstGuest);
+	EXPECT_EQ(firstGuest + static_cast<uint32_t>(second - first), secondGuest);
+	EXPECT_EQ(second, __retdec_pe32_guest_to_host(secondGuest));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(second));
+	EXPECT_EQ(nullptr, __retdec_pe32_guest_to_host(firstGuest));
+	EXPECT_EQ(0, retdec_pe32_unregister_host_pointer(first));
+	EXPECT_EQ(0, munmap(mapping, static_cast<size_t>(pageSize) * 2));
+}
+
+#if defined(__x86_64__) && defined(MAP_32BIT)
+TEST(Pe32RuntimeTests, AutomaticallyRegistersLowHostMapping)
+{
+	const long pageSize = sysconf(_SC_PAGESIZE);
+	ASSERT_GT(pageSize, 0);
+	auto* mapping = static_cast<uint8_t*>(mmap(
+			nullptr,
+			static_cast<size_t>(pageSize),
+			PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT,
+			-1,
+			0));
+	if (mapping == MAP_FAILED)
+	{
+		GTEST_SKIP() << "MAP_32BIT is unavailable";
+	}
+	ASSERT_LE(reinterpret_cast<uintptr_t>(mapping), UINT32_MAX);
+	auto* pointer = mapping + 23;
+	const uint32_t guest = __retdec_pe32_host_to_guest(pointer, pointer, 0);
+	ASSERT_NE(0u, guest);
+	EXPECT_EQ(pointer + 7, __retdec_pe32_guest_to_host(guest + 7));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(pointer));
+	EXPECT_EQ(0, munmap(mapping, static_cast<size_t>(pageSize)));
+}
+#endif
+
+TEST(Pe32RuntimeTests,
+		AutomaticMappingFailsClosedOnOverlappingExplicitSubrange)
+{
+	const long pageSize = sysconf(_SC_PAGESIZE);
+	ASSERT_GT(pageSize, 0);
+	auto* mapping = static_cast<uint8_t*>(mmap(
+			nullptr,
+			static_cast<size_t>(pageSize) * 2,
+			PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS,
+			-1,
+			0));
+	ASSERT_NE(MAP_FAILED, mapping);
+	constexpr uint32_t guestBase = 0x61000000u;
+	ASSERT_EQ(guestBase, retdec_pe32_register_host_object(
+			mapping + 128, 64, guestBase));
+	EXPECT_EQ(guestBase + 12, __retdec_pe32_host_to_guest(
+			mapping + 140, mapping + 140, 0));
+	EXPECT_EQ(0u, __retdec_pe32_host_to_guest(
+			mapping + pageSize, mapping + pageSize, 0));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(mapping + 140));
+
+	const uint32_t automaticGuest = __retdec_pe32_host_to_guest(
+			mapping + pageSize, mapping + pageSize, 0);
+	ASSERT_NE(0u, automaticGuest);
+	EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(mapping + pageSize));
+	EXPECT_EQ(0, munmap(mapping, static_cast<size_t>(pageSize) * 2));
+}
+
+TEST(Pe32RuntimeTests, AutomaticMappingRejectsNullAndUnmappedPointers)
+{
+	EXPECT_EQ(0u, __retdec_pe32_host_to_guest(nullptr, nullptr, 0));
+	EXPECT_EQ(nullptr, __retdec_pe32_guest_to_host(1));
+	const long pageSize = sysconf(_SC_PAGESIZE);
+	ASSERT_GT(pageSize, 0);
+	auto* mapping = static_cast<uint8_t*>(mmap(
+			nullptr,
+			static_cast<size_t>(pageSize),
+			PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS,
+			-1,
+			0));
+	ASSERT_NE(MAP_FAILED, mapping);
+	ASSERT_EQ(0, munmap(mapping, static_cast<size_t>(pageSize)));
+	EXPECT_EQ(0u, __retdec_pe32_host_to_guest(mapping, mapping, 0));
+}
+#endif
 
 } // namespace tests
 } // namespace bin2llvmir

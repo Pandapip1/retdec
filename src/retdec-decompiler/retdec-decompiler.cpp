@@ -670,6 +670,10 @@ LLVM IR debug arguments:
 PE32 native-retarget runtime hook ABI:
 	uint32_t __retdec_pe32_host_to_guest(void *pointer, void *allocation_base, uint32_t allocation_size)
 	void *__retdec_pe32_guest_to_host(uint32_t guest_address)
+	Every selected/exported non-variadic entry additionally exports a
+	<guest-symbol>.retdec_native wrapper. Proven pointer parameters use native
+	void* ABI and request size-zero containing-mapping registration; other
+	parameters pass through. Return values retain the original guest ABI.
 Other arguments:
 	[-h|--help] Show this help.
 	[--version] Show RetDec version.

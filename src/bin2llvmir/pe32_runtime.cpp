@@ -5,6 +5,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -37,6 +38,47 @@ bool guestRangeValid(uint32_t base, uint32_t extent)
 	return base != 0
 			&& extent != 0
 			&& base <= std::numeric_limits<uint32_t>::max() - (extent - 1u);
+}
+
+bool discoverHostMapping(
+		uintptr_t address,
+		uintptr_t& mappingBase,
+		uint32_t& mappingExtent)
+{
+#if defined(__linux__)
+	auto* mappings = std::fopen("/proc/self/maps", "r");
+	if (mappings == nullptr)
+	{
+		return false;
+	}
+	char line[512];
+	bool found = false;
+	while (std::fgets(line, sizeof(line), mappings) != nullptr)
+	{
+		unsigned long long start = 0;
+		unsigned long long end = 0;
+		if (std::sscanf(line, "%llx-%llx", &start, &end) != 2
+				|| address < start || address >= end)
+		{
+			continue;
+		}
+		const uint64_t extent = end - start;
+		if (extent != 0 && extent <= std::numeric_limits<uint32_t>::max())
+		{
+			mappingBase = static_cast<uintptr_t>(start);
+			mappingExtent = static_cast<uint32_t>(extent);
+			found = true;
+		}
+		break;
+	}
+	std::fclose(mappings);
+	return found;
+#else
+	(void)address;
+	(void)mappingBase;
+	(void)mappingExtent;
+	return false;
+#endif
 }
 
 template<typename T>
@@ -205,6 +247,24 @@ extern "C" int retdec_pe32_unregister_host_object(void* hostBase)
 	return 1;
 }
 
+extern "C" int retdec_pe32_unregister_host_pointer(void* hostPointer)
+{
+	const auto address = reinterpret_cast<uintptr_t>(hostPointer);
+	std::lock_guard<std::mutex> lock(regionsMutex);
+	auto region = std::find_if(
+			regions.begin(), regions.end(),
+			[address](const Region& item) {
+				return address >= item.hostBase
+						&& address - item.hostBase < item.extent;
+			});
+	if (region == regions.end())
+	{
+		return 0;
+	}
+	regions.erase(region);
+	return 1;
+}
+
 extern "C" uint32_t __retdec_pe32_host_to_guest(
 		void* pointer,
 		void* allocationBase,
@@ -227,17 +287,28 @@ extern "C" uint32_t __retdec_pe32_host_to_guest(
 			}
 		}
 	}
-	const auto base = reinterpret_cast<uintptr_t>(allocationBase);
-	if (!hostRangeValid(base, allocationSize)
-			|| address < base
-			|| address - base >= allocationSize)
+	uintptr_t discoveredBase = 0;
+	uint32_t discoveredExtent = 0;
+	if (allocationSize == 0)
+	{
+		if (!discoverHostMapping(address, discoveredBase, discoveredExtent))
+		{
+			return 0;
+		}
+		allocationBase = reinterpret_cast<void*>(discoveredBase);
+		allocationSize = discoveredExtent;
+	}
+	const auto effectiveBase = reinterpret_cast<uintptr_t>(allocationBase);
+	if (!hostRangeValid(effectiveBase, allocationSize)
+			|| address < effectiveBase
+			|| address - effectiveBase >= allocationSize)
 	{
 		allocationBase = pointer;
 		allocationSize = 1;
 	}
 
-	const uint32_t guestBase = retdec_pe32_register_host_object(
-			allocationBase, allocationSize, 0);
+	const uint32_t guestBase = registerRegion(
+			reinterpret_cast<uintptr_t>(allocationBase), allocationSize, 0);
 	if (guestBase == 0)
 	{
 		return 0;

@@ -7,9 +7,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
@@ -535,6 +538,229 @@ bool localizePrivateFunctions(Module* module, Config* config)
 	return changed;
 }
 
+bool sameMemoryLocation(Value* first, Value* second)
+{
+	return first->stripPointerCasts() == second->stripPointerCasts();
+}
+
+bool valueDependsOnArgument(
+		Value* value,
+		Argument* argument,
+		SmallPtrSetImpl<Value*>& visited)
+{
+	if (value == argument)
+	{
+		return true;
+	}
+	if (!visited.insert(value).second)
+	{
+		return false;
+	}
+
+	auto* instruction = dyn_cast<Instruction>(value);
+	if (instruction == nullptr || instruction->getFunction() != argument->getParent())
+	{
+		return false;
+	}
+	if (auto* load = dyn_cast<LoadInst>(instruction))
+	{
+		for (Instruction& candidate : instructions(*instruction->getFunction()))
+		{
+			auto* store = dyn_cast<StoreInst>(&candidate);
+			if (store != nullptr
+					&& sameMemoryLocation(
+							store->getPointerOperand(), load->getPointerOperand())
+					&& valueDependsOnArgument(
+							store->getValueOperand(), argument, visited))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+	if (isa<CallBase>(instruction) || isa<StoreInst>(instruction))
+	{
+		return false;
+	}
+	for (Value* operand : instruction->operands())
+	{
+		if (valueDependsOnArgument(operand, argument, visited))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+struct NativeEntryWrapper
+{
+	Function* function;
+	std::set<unsigned> pointerArguments;
+};
+
+std::vector<NativeEntryWrapper> findNativeEntryWrappers(
+		Module* module,
+		Config* config,
+		const std::vector<IntToPtrInst*>& guestDereferences)
+{
+	std::map<Function*, std::set<unsigned>> pointerArguments;
+	for (IntToPtrInst* dereference : guestDereferences)
+	{
+		Function* function = dereference->getFunction();
+		for (Argument& argument : function->args())
+		{
+			if (!argument.getType()->isIntegerTy(32))
+			{
+				continue;
+			}
+			SmallPtrSet<Value*, 32> visited;
+			if (valueDependsOnArgument(
+						dereference->getOperand(0), &argument, visited))
+			{
+				pointerArguments[function].insert(argument.getArgNo());
+			}
+		}
+	}
+
+	// Propagate semantic guest-pointer parameters through direct lifted calls.
+	// This catches selected native entries that forward an integer ABI slot to
+	// a private helper which performs the eventual inttoptr/dereference.
+	bool discovered = true;
+	while (discovered)
+	{
+		discovered = false;
+		for (Function& caller : *module)
+		{
+			if (caller.isDeclaration())
+			{
+				continue;
+			}
+			for (Instruction& instruction : instructions(caller))
+			{
+				auto* call = dyn_cast<CallBase>(&instruction);
+				Function* callee = call != nullptr
+						? call->getCalledFunction() : nullptr;
+				auto calleeArguments = pointerArguments.find(callee);
+				if (callee == nullptr
+						|| calleeArguments == pointerArguments.end())
+				{
+					continue;
+				}
+				for (unsigned calleeArgument : calleeArguments->second)
+				{
+					if (calleeArgument >= call->arg_size())
+					{
+						continue;
+					}
+					for (Argument& callerArgument : caller.args())
+					{
+						if (!callerArgument.getType()->isIntegerTy(32))
+						{
+							continue;
+						}
+						SmallPtrSet<Value*, 32> visited;
+						if (valueDependsOnArgument(
+									call->getArgOperand(calleeArgument),
+									&callerArgument,
+									visited))
+						{
+							discovered |= pointerArguments[&caller].insert(
+									callerArgument.getArgNo()).second;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	std::vector<NativeEntryWrapper> wrappers;
+	for (Function& function : *module)
+	{
+		auto* configured = config->getConfigFunction(&function);
+		if (function.isDeclaration()
+				|| function.isVarArg()
+				|| configured == nullptr
+				|| !isNativeEntryPoint(config, configured))
+		{
+			continue;
+		}
+
+		auto arguments = pointerArguments.find(&function);
+		NativeEntryWrapper wrapper{
+				&function,
+				arguments != pointerArguments.end()
+						? arguments->second : std::set<unsigned>{}};
+		wrappers.push_back(std::move(wrapper));
+	}
+	return wrappers;
+}
+
+bool createNativeEntryWrappers(
+		Module* module,
+		const std::vector<NativeEntryWrapper>& wrappers,
+		Function* hostToGuest)
+{
+	bool changed = false;
+	auto* int32 = Type::getInt32Ty(module->getContext());
+	auto* bytePointer = Type::getInt8PtrTy(module->getContext());
+	for (const auto& wrapperInfo : wrappers)
+	{
+		Function* guestFunction = wrapperInfo.function;
+		const std::string wrapperName =
+				(guestFunction->getName() + ".retdec_native").str();
+		if (module->getFunction(wrapperName) != nullptr)
+		{
+			continue;
+		}
+
+		std::vector<Type*> argumentTypes;
+		for (Argument& argument : guestFunction->args())
+		{
+			argumentTypes.push_back(wrapperInfo.pointerArguments.count(
+						argument.getArgNo()) != 0
+					? bytePointer
+					: argument.getType());
+		}
+		auto* wrapperType = FunctionType::get(
+				guestFunction->getReturnType(), argumentTypes, false);
+		auto* wrapper = Function::Create(
+				wrapperType,
+				GlobalValue::ExternalLinkage,
+				wrapperName,
+				module);
+		wrapper->setCallingConv(guestFunction->getCallingConv());
+		auto* block = BasicBlock::Create(
+				module->getContext(), "entry", wrapper);
+		IRBuilder<> builder(block);
+		std::vector<Value*> guestArguments;
+		for (Argument& argument : wrapper->args())
+		{
+			if (wrapperInfo.pointerArguments.count(argument.getArgNo()) == 0)
+			{
+				guestArguments.push_back(&argument);
+				continue;
+			}
+			argument.setName("host_pointer");
+			guestArguments.push_back(builder.CreateCall(
+					hostToGuest,
+					{&argument, &argument, ConstantInt::get(int32, 0)},
+					"guest_pointer"));
+		}
+		auto* call = builder.CreateCall(guestFunction, guestArguments);
+		call->setCallingConv(guestFunction->getCallingConv());
+		if (guestFunction->getReturnType()->isVoidTy())
+		{
+			builder.CreateRetVoid();
+		}
+		else
+		{
+			builder.CreateRet(call);
+		}
+		changed = true;
+	}
+	return changed;
+}
+
 } // anonymous namespace
 
 bool Pe32PointerBridge::run()
@@ -631,6 +857,8 @@ bool Pe32PointerBridge::run()
 			}
 		}
 	}
+	auto nativeEntryWrappers = findNativeEntryWrappers(
+			_module, _config, guestDereferences);
 	// A decoded indirect target may be represented only by its original PE32
 	// integer address.  Preserve exact configured targets used by inttoptr,
 	// even when there is consequently no symbolic LLVM use of the function.
@@ -680,6 +908,7 @@ bool Pe32PointerBridge::run()
 			&& guestDereferences.empty()
 			&& addressSpaceCasts.empty()
 			&& pointerInitializers.empty()
+			&& nativeEntryWrappers.empty()
 			&& !hasConfiguredMappings)
 	{
 		return changed;
@@ -860,6 +1089,8 @@ bool Pe32PointerBridge::run()
 		cast->replaceAllUsesWith(replacement);
 		cast->eraseFromParent();
 	}
+	changed |= createNativeEntryWrappers(
+			_module, nativeEntryWrappers, hostToGuest);
 
 	return changed
 			|| !hostEscapes.empty()

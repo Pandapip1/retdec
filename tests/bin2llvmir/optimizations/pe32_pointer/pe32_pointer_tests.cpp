@@ -687,6 +687,102 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeCreatesAllNativeEntryWrappersAndPromotesOnlyProvenPointerArguments)
+{
+	parseInput(R"(
+		define internal i32 @helper(i32 %guest) {
+			%pointer = inttoptr i32 %guest to i32*
+			%value = load i32, i32* %pointer, align 4
+			ret i32 %value
+		}
+		define i32 @entry(i32 %scalar, i32 %direct, i32 %forwarded) {
+			%direct.pointer = inttoptr i32 %direct to i32*
+			%direct.value = load i32, i32* %direct.pointer, align 4
+			%derived = add i32 %forwarded, 4
+			%forwarded.value = call i32 @helper(i32 %derived)
+			%sum = add i32 %direct.value, %forwarded.value
+			%result = add i32 %sum, %scalar
+			ret i32 %result
+		}
+		define i32 @private(i32 %guest) {
+			%pointer = inttoptr i32 %guest to i32*
+			%value = load i32, i32* %pointer, align 4
+			ret i32 %value
+		}
+		define i32 @scalar.entry(i32 %value) {
+			%result = add i32 %value, 1
+			ret i32 %result
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addFunctionRange(config, "entry", 0x401000, 0x401020);
+	addFunctionRange(config, "helper", 0x402000, 0x402020);
+	addFunctionRange(config, "private", 0x403000, 0x403020);
+	addFunctionRange(config, "scalar.entry", 0x404000, 0x404020);
+	config.getConfig().parameters.selectedRanges.insert(
+			retdec::common::AddressRange(0x401000, 0x401020));
+	config.getConfig().parameters.selectedRanges.insert(
+			retdec::common::AddressRange(0x404000, 0x404020));
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* guestEntry = module->getFunction("entry");
+	auto* nativeEntry = module->getFunction("entry.retdec_native");
+	ASSERT_NE(nullptr, guestEntry);
+	ASSERT_NE(nullptr, nativeEntry);
+	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(0)->isIntegerTy(32));
+	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(1)->isIntegerTy(32));
+	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(2)->isIntegerTy(32));
+	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(0)->isIntegerTy(32));
+	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(1)->isPointerTy());
+	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(2)->isPointerTy());
+	EXPECT_EQ(nullptr, module->getFunction("helper.retdec_native"));
+	EXPECT_EQ(nullptr, module->getFunction("private.retdec_native"));
+	auto* scalarEntry = module->getFunction("scalar.entry.retdec_native");
+	ASSERT_NE(nullptr, scalarEntry);
+	EXPECT_TRUE(scalarEntry->getFunctionType()->getParamType(0)->isIntegerTy(32));
+
+	unsigned encodes = 0;
+	CallInst* guestCall = nullptr;
+	for (Instruction& instruction : instructions(nativeEntry))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr || call->getCalledFunction() == nullptr)
+		{
+			continue;
+		}
+		if (call->getCalledFunction()->getName()
+				== "__retdec_pe32_host_to_guest")
+		{
+			++encodes;
+			EXPECT_EQ(call->getArgOperand(0), call->getArgOperand(1));
+			auto* extent = dyn_cast<ConstantInt>(call->getArgOperand(2));
+			ASSERT_NE(nullptr, extent);
+			EXPECT_TRUE(extent->isZero());
+		}
+		else if (call->getCalledFunction() == guestEntry)
+		{
+			guestCall = call;
+		}
+	}
+	EXPECT_EQ(2u, encodes);
+	ASSERT_NE(nullptr, guestCall);
+	EXPECT_TRUE(guestCall->getArgOperand(0)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(guestCall->getArgOperand(1)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(guestCall->getArgOperand(2)->getType()->isIntegerTy(32));
+	unsigned scalarEncodes = 0;
+	for (Instruction& instruction : instructions(scalarEntry))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		scalarEncodes += call != nullptr
+				&& call->getCalledFunction() != nullptr
+				&& call->getCalledFunction()->getName()
+						== "__retdec_pe32_host_to_guest";
+	}
+	EXPECT_EQ(0u, scalarEncodes);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec

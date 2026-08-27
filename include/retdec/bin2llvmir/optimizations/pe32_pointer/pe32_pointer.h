@@ -51,10 +51,16 @@ class Pe32PointerLegalization : public llvm::ModulePass
  * __retdec_pe32_host_to_guest(pointer, allocationBase, allocationSize)
  * returns a stable 32-bit guest address for a native pointer.  The base and
  * extent let the runtime preserve pointer arithmetic across an escaped stack
- * or global object.  Unknown external objects are registered as one-byte
- * exact mappings until a native boundary supplies a wider region.
+ * or global object.  A zero extent requests discovery of the containing host
+ * virtual-memory mapping for a generated native-entry wrapper.
  *
  * __retdec_pe32_guest_to_host(address) performs the inverse translation.
+ * Every selected/exported non-variadic guest-ABI function retains its original
+ * symbol and receives a native ABI wrapper named
+ * <guest-symbol>.retdec_native.  Integer parameters that provably feed guest
+ * pointer dereferences become native pointer parameters; all other parameters
+ * pass through unchanged.  Return values retain the guest function's original
+ * ABI, including guest-encoded integer pointer returns.
  */
 class Pe32PointerBridge : public llvm::ModulePass
 {
