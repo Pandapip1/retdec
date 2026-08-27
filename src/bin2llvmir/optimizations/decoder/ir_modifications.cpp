@@ -30,6 +30,38 @@ llvm::CallInst* Decoder::transformToCall(
 	return c;
 }
 
+/**
+ * Replace a pseudo call whose target cannot be resolved statically with a
+ * real indirect call.  Decoded functions initially use the ABI's default
+ * scalar return type and no parameters; ParamReturn subsequently recovers the
+ * actual arguments and return value in exactly the same way as it does for an
+ * unresolved function declaration.
+ */
+llvm::CallInst* Decoder::transformToIndirectCall(
+		llvm::CallInst* pseudo,
+		llvm::Value* callee)
+{
+	auto* returnType = Abi::getDefaultType(_module);
+	auto* functionType = FunctionType::get(returnType, false);
+	auto* functionPointerType = PointerType::get(functionType, 0);
+	auto* calleePointer = IrModifier::convertValueToTypeAfter(
+			callee,
+			functionPointerType,
+			pseudo);
+	auto* c = CallInst::Create(calleePointer);
+	c->insertAfter(cast<Instruction>(calleePointer));
+
+	if (auto* retObj = getCallReturnObject())
+	{
+		auto* cc = cast<Instruction>(
+				IrModifier::convertValueToTypeAfter(c, retObj->getValueType(), c));
+		auto* s = new StoreInst(cc, retObj);
+		s->insertAfter(cc);
+	}
+
+	return c;
+}
+
 llvm::CallInst* Decoder::transformToCondCall(
 		llvm::CallInst* pseudo,
 		llvm::Value* cond,
