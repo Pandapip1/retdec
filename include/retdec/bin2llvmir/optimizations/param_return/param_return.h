@@ -126,6 +126,8 @@ class DataFlowEntry
 		// In called function.
 		//
 		std::vector<llvm::LoadInst*> argLoads;
+		std::map<llvm::Instruction*, std::pair<llvm::Value*, int64_t>>
+				overlappingArgAccesses;
 		std::vector<ReturnEntry> retStores;
 
 		// Result.

@@ -417,6 +417,59 @@ void CallEntry::filterSort(Config* _config)
 			return aOff < bOff;
 		}
 	});
+
+	if (_config->getConfig().architecture.isX86())
+	{
+		struct OutgoingRange
+		{
+			int64_t begin;
+			int64_t end;
+		};
+		std::vector<OutgoingRange> occupied;
+		auto it = stores.begin();
+		while (it != stores.end())
+		{
+			auto off = _config->getStackVariableOffset(
+					(*it)->getPointerOperand());
+			if (off.isUndefined())
+			{
+				++it;
+				continue;
+			}
+
+			uint64_t size = (*it)->getModule()->getDataLayout()
+					.getTypeStoreSize((*it)->getValueOperand()->getType());
+			auto instruction = AsmInstruction(*it);
+			auto* capstone = instruction.isValid()
+					? instruction.getCapstoneInsn() : nullptr;
+			if (capstone != nullptr && capstone->id == X86_INS_PUSH)
+			{
+				size = _config->getConfig().architecture.getByteSize();
+			}
+
+			int64_t begin = off.getValue();
+			int64_t end = begin + size;
+			bool overwritten = false;
+			for (const auto& range : occupied)
+			{
+				if (range.begin <= begin && begin < range.end)
+				{
+					overwritten = true;
+					break;
+				}
+			}
+			if (overwritten)
+			{
+				unresolvedStackArgStores.erase(*it);
+				it = stores.erase(it);
+			}
+			else
+			{
+				occupied.push_back({begin, end});
+				++it;
+			}
+		}
+	}
 }
 
 void DataFlowEntry::filterSortArgLoads()
@@ -447,6 +500,179 @@ void DataFlowEntry::filterSortArgLoads()
 			return aOff < bOff;
 		}
 	});
+
+	// The same x86 stack argument may be read through several overlapping
+	// views.  A common example is a double read at [ebp+8] followed by an
+	// exponent-word read at [ebp+14].  StackAnalysis represents those accesses
+	// by separate allocas, but they describe one incoming object.  Keep the
+	// widest first view and let the later stack-frame pass preserve the aliasing
+	// between its sub-accesses.
+	if (_config->getConfig().architecture.isX86())
+	{
+		struct StackArgumentRange
+		{
+			int64_t begin;
+			int64_t end;
+			Value* storage;
+		};
+		std::vector<StackArgumentRange> occupied;
+		auto it = argLoads.begin();
+		while (it != argLoads.end())
+		{
+			auto off = _config->getStackVariableOffset(
+					(*it)->getPointerOperand());
+			auto* type = (*it)->getType();
+			if (off.isUndefined() || !type->isSized())
+			{
+				++it;
+				continue;
+			}
+
+			uint64_t accessSize =
+					_module->getDataLayout().getTypeStoreSize(type);
+			uint64_t truncatedSize = 0;
+			bool onlyTruncatedUses = !(*it)->use_empty();
+			for (auto* user : (*it)->users())
+			{
+				auto* truncation = dyn_cast<TruncInst>(user);
+				if (truncation != nullptr && truncation->getType()->isSized())
+				{
+					truncatedSize = std::max(
+							truncatedSize,
+							_module->getDataLayout().getTypeStoreSize(
+									truncation->getType()));
+					continue;
+				}
+
+				// Decoded partial-register code commonly moves a full stack word to
+				// EAX and then uses AX.  Follow that one register-definition hop so
+				// the effective stack access is the consumed low word, rather than
+				// the deliberately over-reading machine load.
+				auto* store = dyn_cast<StoreInst>(user);
+				if (store == nullptr
+						|| !_config->isRegister(store->getPointerOperand()))
+				{
+					onlyTruncatedUses = false;
+					break;
+				}
+				auto* definition = _RDA.getDef(store);
+				if (definition == nullptr || definition->uses.empty())
+				{
+					onlyTruncatedUses = false;
+					break;
+				}
+				for (auto* use : definition->uses)
+				{
+					auto* registerLoad = dyn_cast<LoadInst>(use->use);
+					if (registerLoad == nullptr || registerLoad->use_empty())
+					{
+						onlyTruncatedUses = false;
+						break;
+					}
+					for (auto* propagatedUser : registerLoad->users())
+					{
+						auto* propagatedTruncation =
+								dyn_cast<TruncInst>(propagatedUser);
+						if (propagatedTruncation == nullptr
+								|| !propagatedTruncation->getType()->isSized())
+						{
+							onlyTruncatedUses = false;
+							break;
+						}
+						truncatedSize = std::max(
+								truncatedSize,
+								_module->getDataLayout().getTypeStoreSize(
+										propagatedTruncation->getType()));
+					}
+					if (!onlyTruncatedUses)
+					{
+						break;
+					}
+				}
+				if (!onlyTruncatedUses)
+				{
+					break;
+				}
+			}
+			if (onlyTruncatedUses && truncatedSize != 0)
+			{
+				accessSize = truncatedSize;
+			}
+
+			int64_t begin = off.getValue();
+			int64_t end = begin + accessSize;
+			bool overlaps = false;
+			Value* containingStorage = nullptr;
+			int64_t containingBegin = 0;
+			for (const auto& range : occupied)
+			{
+				if (range.begin <= begin && begin < range.end)
+				{
+					overlaps = true;
+					containingStorage = range.storage;
+					containingBegin = range.begin;
+					break;
+				}
+			}
+			if (overlaps)
+			{
+				overlappingArgAccesses[*it] = {
+						containingStorage, begin - containingBegin};
+				it = argLoads.erase(it);
+			}
+			else
+			{
+				occupied.push_back({
+						begin, end, (*it)->getPointerOperand()});
+				++it;
+			}
+		}
+
+		// Rebase every recovered access into a retained incoming argument, not
+		// only the first undefined load that identified the argument.  A later
+		// load can have a local store as one reaching definition (for example a
+		// loop that updates a double's exponent word), but its initial value still
+		// aliases the incoming argument bytes.  Independent allocas would lose
+		// both that initial value and subsequent partial writes.
+		auto* function = getFunction();
+		if (function != nullptr)
+		{
+			for (auto& block : *function)
+			for (auto& instruction : block)
+			{
+				Value* pointer = nullptr;
+				if (auto* load = dyn_cast<LoadInst>(&instruction))
+				{
+					pointer = load->getPointerOperand();
+				}
+				else if (auto* store = dyn_cast<StoreInst>(&instruction))
+				{
+					pointer = store->getPointerOperand();
+				}
+				if (pointer == nullptr)
+				{
+					continue;
+				}
+
+				auto offset = _config->getStackVariableOffset(pointer);
+				if (offset.isUndefined())
+				{
+					continue;
+				}
+				for (const auto& range : occupied)
+				{
+					if (pointer != range.storage
+							&& range.begin <= offset.getValue()
+							&& offset.getValue() < range.end)
+					{
+						overlappingArgAccesses[&instruction] = {
+								range.storage, offset.getValue() - range.begin};
+						break;
+					}
+				}
+			}
+		}
+	}
 }
 
 /**
@@ -869,6 +1095,81 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	NonIterableSet<Value*> disqualifiedValues;
 	unsigned maxUsedRegNum = 0;
 	Value* pendingStackPointer = nullptr;
+	unsigned cleanupBytes = 0;
+	if (_config->getConfig().architecture.isX86())
+	{
+		for (auto* next = call->getNextNode(); next != nullptr;
+				next = next->getNextNode())
+		{
+			if (auto* nextCall = dyn_cast<CallInst>(next))
+			{
+				auto* called = nextCall->getCalledFunction();
+				if (called == nullptr || !called->isIntrinsic())
+				{
+					break;
+				}
+			}
+			auto* store = dyn_cast<StoreInst>(next);
+			if (store == nullptr
+					|| !_config->isStackPointerRegister(
+							store->getPointerOperand()))
+			{
+				continue;
+			}
+			auto* stackPointer = store->getPointerOperand();
+			auto* addition = dyn_cast<BinaryOperator>(
+					llvm_utils::skipCasts(store->getValueOperand()));
+			if (addition == nullptr || addition->getOpcode() != Instruction::Add)
+			{
+				continue;
+			}
+			for (unsigned operand = 0; operand < 2; ++operand)
+			{
+				auto* amount = dyn_cast<ConstantInt>(
+						addition->getOperand(operand));
+				auto* load = dyn_cast<LoadInst>(llvm_utils::skipCasts(
+						addition->getOperand(1 - operand)));
+				if (amount != nullptr && amount->getSExtValue() > 0
+						&& load != nullptr
+						&& load->getPointerOperand() == stackPointer)
+				{
+					cleanupBytes = amount->getZExtValue();
+					break;
+				}
+			}
+			if (cleanupBytes != 0)
+			{
+				break;
+			}
+		}
+		// Stack analysis may replace the restored ESP value with a pointer to
+		// the recovered frame, leaving the original add dead.  In that case the
+		// machine instruction remains the authoritative cleanup-size source.
+		if (cleanupBytes == 0)
+		{
+			auto nextAsm = AsmInstruction(call).getNext();
+			auto* instruction = nextAsm.isValid()
+					? nextAsm.getCapstoneInsn() : nullptr;
+			if (instruction != nullptr && instruction->id == X86_INS_ADD
+					&& instruction->detail != nullptr)
+			{
+				auto& x86 = instruction->detail->x86;
+				if (x86.op_count == 2
+						&& x86.operands[0].type == X86_OP_REG
+						&& (x86.operands[0].reg == X86_REG_SP
+								|| x86.operands[0].reg == X86_REG_ESP
+								|| x86.operands[0].reg == X86_REG_RSP)
+						&& x86.operands[1].type == X86_OP_IMM
+						&& x86.operands[1].imm > 0
+						&& static_cast<uint64_t>(x86.operands[1].imm)
+								<= std::numeric_limits<unsigned>::max())
+				{
+					cleanupBytes = static_cast<unsigned>(
+							x86.operands[1].imm);
+				}
+			}
+		}
+	}
 	auto* b = call->getParent();
 	Instruction* prev = call;
 	std::set<BasicBlock*> seen;
@@ -911,6 +1212,7 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 			auto* val = store->getValueOperand();
 			auto* ptr = store->getPointerOperand();
 			bool isUnresolvedX86Push = false;
+			bool isUnresolvedX86StackBlock = false;
 
 			// A decoded x86 push is represented by two stores:
 			//
@@ -934,7 +1236,24 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				pendingStackPointer = nullptr;
 			}
 
-			if (!isUnresolvedX86Push
+			// Compilers pass x87 values by reserving a block with SUB ESP and
+			// storing directly through the resulting current ESP.  There is no
+			// PUSH-like store back to ESP for addCallArgs() to pair with.  A matching
+			// caller cleanup proves that this current-SP store is outgoing argument
+			// storage; consume its SSA value directly just like a recovered push.
+			if (_config->getConfig().architecture.isX86()
+					&& cleanupBytes != 0 && val->getType()->isSized())
+			{
+				auto* address = llvm_utils::skipCasts(ptr);
+				auto* spLoad = dyn_cast<LoadInst>(address);
+				isUnresolvedX86StackBlock = spLoad != nullptr
+						&& _config->isStackPointerRegister(
+								spLoad->getPointerOperand())
+						&& _module->getDataLayout().getTypeStoreSize(
+								val->getType()) <= cleanupBytes;
+			}
+
+			if (!isUnresolvedX86Push && !isUnresolvedX86StackBlock
 					&& !_config->isStackVariable(ptr)
 					&& !_config->isRegister(ptr))
 			{
@@ -960,10 +1279,12 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 					&& !_config->isFlagRegister(ptr)
 					&& (isa<AllocaInst>(ptr)
 							|| _config->isRegister(ptr)
-							|| isUnresolvedX86Push))
+							|| isUnresolvedX86Push
+							|| isUnresolvedX86StackBlock))
 			{
 				ce.possibleArgStores.push_back(store);
-				if (isUnresolvedX86Push && !_config->isStackVariable(ptr))
+				if ((isUnresolvedX86Push || isUnresolvedX86StackBlock)
+						&& !_config->isStackVariable(ptr))
 				{
 					ce.unresolvedStackArgStores.insert(store);
 				}
@@ -989,76 +1310,6 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	// after unresolved push stores have been recovered.
 	if (_config->getConfig().architecture.isX86())
 	{
-		unsigned cleanupBytes = 0;
-		for (auto* next = call->getNextNode(); next != nullptr;
-				next = next->getNextNode())
-		{
-			if (auto* nextCall = dyn_cast<CallInst>(next))
-			{
-				auto* called = nextCall->getCalledFunction();
-				if (called == nullptr || !called->isIntrinsic())
-				{
-					break;
-				}
-			}
-			auto* store = dyn_cast<StoreInst>(next);
-			if (store == nullptr
-					|| !_config->isStackPointerRegister(store->getPointerOperand()))
-			{
-				continue;
-			}
-			auto* stackPointer = store->getPointerOperand();
-			auto* addition = dyn_cast<BinaryOperator>(
-					llvm_utils::skipCasts(store->getValueOperand()));
-			if (addition == nullptr || addition->getOpcode() != Instruction::Add)
-			{
-				continue;
-			}
-			for (unsigned operand = 0; operand < 2; ++operand)
-			{
-				auto* amount = dyn_cast<ConstantInt>(addition->getOperand(operand));
-				auto* load = dyn_cast<LoadInst>(llvm_utils::skipCasts(
-						addition->getOperand(1 - operand)));
-				if (amount != nullptr && amount->getSExtValue() > 0
-						&& load != nullptr
-						&& load->getPointerOperand() == stackPointer)
-				{
-					cleanupBytes = amount->getZExtValue();
-					break;
-				}
-			}
-			if (cleanupBytes != 0)
-			{
-				break;
-			}
-		}
-		// Stack analysis may replace the restored ESP value with a pointer to
-		// the recovered frame, leaving the original add dead.  In that case the
-		// machine instruction remains the authoritative cleanup-size source.
-		if (cleanupBytes == 0)
-		{
-			auto nextAsm = AsmInstruction(call).getNext();
-			auto* instruction = nextAsm.isValid()
-					? nextAsm.getCapstoneInsn() : nullptr;
-			if (instruction != nullptr && instruction->id == X86_INS_ADD
-					&& instruction->detail != nullptr)
-			{
-				auto& x86 = instruction->detail->x86;
-				if (x86.op_count == 2
-						&& x86.operands[0].type == X86_OP_REG
-						&& (x86.operands[0].reg == X86_REG_SP
-								|| x86.operands[0].reg == X86_REG_ESP
-								|| x86.operands[0].reg == X86_REG_RSP)
-						&& x86.operands[1].type == X86_OP_IMM
-						&& x86.operands[1].imm > 0
-						&& static_cast<uint64_t>(x86.operands[1].imm)
-								<= std::numeric_limits<unsigned>::max())
-				{
-					cleanupBytes = static_cast<unsigned>(x86.operands[1].imm);
-				}
-			}
-		}
-
 		unsigned slotSize = _config->getConfig().architecture.getByteSize();
 		if (cleanupBytes != 0 && slotSize != 0)
 		{
@@ -1421,6 +1672,52 @@ void DataFlowEntry::applyToIrOrdinary()
 			return;
 		}
 
+		// Make contained/overlapping incoming stack views read the canonical
+		// argument object before LocalVars replaces undefined alloca loads.  This
+		// preserves exact byte aliasing (for example, a word at byte six of a
+		// double argument) without inventing a second ABI parameter.
+		for (const auto& alias : overlappingArgAccesses)
+		{
+			auto* access = alias.first;
+			auto* storage = alias.second.first;
+			auto offset = alias.second.second;
+			auto* bytePtr = new BitCastInst(
+					storage,
+					Type::getInt8PtrTy(_module->getContext()),
+					"",
+					access);
+			auto* adjusted = GetElementPtrInst::Create(
+					Type::getInt8Ty(_module->getContext()),
+					bytePtr,
+					ConstantInt::get(
+							Type::getInt32Ty(_module->getContext()), offset),
+					"",
+					access);
+			Value* pointer = nullptr;
+			if (auto* load = dyn_cast<LoadInst>(access))
+			{
+				pointer = load->getPointerOperand();
+			}
+			else if (auto* store = dyn_cast<StoreInst>(access))
+			{
+				pointer = store->getPointerOperand();
+			}
+			assert(pointer != nullptr);
+			auto* typed = new BitCastInst(
+					adjusted,
+					pointer->getType(),
+					"",
+					access);
+			if (auto* load = dyn_cast<LoadInst>(access))
+			{
+				load->setOperand(0, typed);
+			}
+			else
+			{
+				cast<StoreInst>(access)->setOperand(1, typed);
+			}
+		}
+
 		std::map<llvm::CallInst*, std::vector<llvm::Value*>> calls2vals;
 		std::set<llvm::StoreInst*> recoveredPushStores;
 		for (auto& e : calls)
@@ -1496,16 +1793,54 @@ void DataFlowEntry::applyToIrOrdinary()
 		}
 
 		std::vector<llvm::Value*> argStores;
-		for (LoadInst* l : argLoads)
+		if (_config->getConfig().architecture.isX86_32())
 		{
-			auto fIt = specialArgStorage.find(argStores.size());
-			while (fIt != specialArgStorage.end())
+			// Cdecl stack offsets are ABI positions, not a compact list of only
+			// those parameters used by the callee.  Preserve holes so a used third
+			// argument at [ebp+16] remains arg3 even when [ebp+12] is never read.
+			argStores.resize(argTypes.size(), nullptr);
+			uint64_t slotSize =
+					_config->getConfig().architecture.getByteSize();
+			int64_t offset = slotSize;
+			std::size_t argument = 0;
+			for (auto* load : argLoads)
 			{
-				argStores.push_back(fIt->second);
-				fIt = specialArgStorage.find(argStores.size());
+				auto loadOffset = _config->getStackVariableOffset(
+						load->getPointerOperand());
+				while (loadOffset.isDefined() && argument < argTypes.size()
+						&& offset < loadOffset.getValue())
+				{
+					uint64_t size = _module->getDataLayout().getTypeStoreSize(
+							argTypes[argument]);
+					offset += std::max<uint64_t>(
+							slotSize, ((size + slotSize - 1) / slotSize) * slotSize);
+					++argument;
+				}
+				if (loadOffset.isDefined() && argument < argStores.size()
+						&& offset == loadOffset.getValue())
+				{
+					argStores[argument] = load->getPointerOperand();
+					uint64_t size = _module->getDataLayout().getTypeStoreSize(
+							argTypes[argument]);
+					offset += std::max<uint64_t>(
+							slotSize, ((size + slotSize - 1) / slotSize) * slotSize);
+					++argument;
+				}
 			}
+		}
+		else
+		{
+			for (LoadInst* l : argLoads)
+			{
+				auto fIt = specialArgStorage.find(argStores.size());
+				while (fIt != specialArgStorage.end())
+				{
+					argStores.push_back(fIt->second);
+					fIt = specialArgStorage.find(argStores.size());
+				}
 
-			argStores.push_back(l->getPointerOperand());
+				argStores.push_back(l->getPointerOperand());
+			}
 		}
 
 		static std::vector<std::string> ppcNames =
@@ -2399,27 +2734,40 @@ void DataFlowEntry::setArgumentTypes()
 {
 	if (calls.empty())
 	{
-		argTypes.insert(
-				argTypes.end(),
-				argLoads.size(),
-				Abi::getDefaultType(_module));
+		for (auto* load : argLoads)
+		{
+			auto* type = load->getType();
+			argTypes.push_back(type->isFloatingPointTy()
+					? type : Abi::getDefaultType(_module));
+		}
 	}
 	else
 	{
 		CallEntry* ce = &calls.front();
 		for (auto& c : calls)
 		{
-			if (!c.possibleArgStores.empty())
+			// A split basic block or an incompletely decoded predecessor can hide
+			// one outgoing stack store at an individual call site.  The filtering
+			// above establishes a common upper bound, so infer the function type
+			// from the most complete surviving call rather than whichever call was
+			// encountered first.
+			if (c.possibleArgStores.size() > ce->possibleArgStores.size())
 			{
 				ce = &c;
-				break;
 			}
 		}
 
-		argTypes.insert(
-				argTypes.end(),
-				ce->possibleArgStores.size(),
-				Abi::getDefaultType(_module));
+		for (auto* store : ce->possibleArgStores)
+		{
+			auto* type = store->getValueOperand()->getType();
+			auto instruction = AsmInstruction(store);
+			auto* capstone = instruction.isValid()
+					? instruction.getCapstoneInsn() : nullptr;
+			bool convertedPush = capstone != nullptr
+					&& capstone->id == X86_INS_PUSH;
+			argTypes.push_back(type->isFloatingPointTy() && !convertedPush
+					? type : Abi::getDefaultType(_module));
+		}
 	}
 }
 

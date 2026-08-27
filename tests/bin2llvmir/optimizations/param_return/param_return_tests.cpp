@@ -502,6 +502,370 @@ TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86RecoversDoubleStoredIntoReservedOutgoingStackBlock)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@eax = global i32 0
+		define void @consume() {
+			%stack_arg = alloca double
+			%exponent_view = alloca i32
+			%whole = load double, double* %stack_arg
+			%exponent_word = load i32, i32* %exponent_view
+			store i32 %exponent_word, i32* @eax
+			%eax_value = load i32, i32* @eax
+			%exponent = trunc i32 %eax_value to i16
+			store i32 1234, i32* %exponent_view
+			ret void
+		}
+		define void @caller(double %input) {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 8
+			store i32 %sp1, i32* @esp
+			%current_sp = load i32, i32* @esp
+			%slot = inttoptr i32 %current_sp to double*
+			store double %input, double* %slot
+			call void @consume()
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 8
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"locals" : [
+					{
+						"name" : "stack_arg",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "exponent_view",
+						"storage" : { "type" : "stack", "value" : 10 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			},
+			{
+				"name" : "eax",
+				"storage" : { "type" : "register", "value" : "eax" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(1u, consume->arg_size());
+	EXPECT_TRUE(consume->arg_begin()->getType()->isDoubleTy());
+	for (Instruction& instruction : consume->front())
+	{
+		if (instruction.getName() == "exponent_view")
+		{
+			EXPECT_TRUE(instruction.use_empty());
+		}
+	}
+
+	CallInst* recoveredCall = nullptr;
+	unsigned dynamicStores = 0;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			if (call->getCalledFunction() == consume)
+			{
+				recoveredCall = call;
+			}
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			dynamicStores += !config.isStackPointerRegister(
+					store->getPointerOperand())
+					&& !isa<GlobalVariable>(store->getPointerOperand());
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(1u, recoveredCall->getNumArgOperands());
+	EXPECT_EQ(&*module->getFunction("caller")->arg_begin(),
+			recoveredCall->getArgOperand(0));
+	EXPECT_EQ(0u, dynamicStores);
+}
+
+TEST_F(ParamReturnTests, x86FloatingStoreOverwritesReservedPushSlot)
+{
+	parseInput(R"(
+		define void @consume() {
+			%floating_arg = alloca double
+			%output_arg = alloca i32
+			%value = load double, double* %floating_arg
+			%output = load i32, i32* %output_arg
+			ret void
+		}
+		define void @caller(double %input, i32 %output) {
+			%floating_slot = alloca double
+			%reserved_slot = alloca i32
+			%output_slot = alloca i32
+			store i32 %output, i32* %output_slot
+			store i32 0, i32* %reserved_slot
+			store double %input, double* %floating_slot
+			call void @consume()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"locals" : [
+					{
+						"name" : "floating_arg",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "output_arg",
+						"storage" : { "type" : "stack", "value" : 12 }
+					}
+				]
+			},
+			{
+				"name" : "caller",
+				"locals" : [
+					{
+						"name" : "floating_slot",
+						"storage" : { "type" : "stack", "value" : -12 }
+					},
+					{
+						"name" : "reserved_slot",
+						"storage" : { "type" : "stack", "value" : -8 }
+					},
+					{
+						"name" : "output_slot",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_TRUE((argument++)->getType()->isDoubleTy());
+	EXPECT_TRUE(argument->getType()->isIntegerTy(32));
+
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(recoveredCall->getArgOperand(0)->getType()->isDoubleTy());
+	EXPECT_TRUE(recoveredCall->getArgOperand(1)->getType()->isIntegerTy(32));
+}
+
+TEST_F(ParamReturnTests, x86FunctionTypeUsesMostCompleteCallSite)
+{
+	parseInput(R"(
+		define void @consume() {
+			%arg1_slot = alloca i32
+			%arg2_slot = alloca i32
+			%arg3_slot = alloca i32
+			%arg1 = load i32, i32* %arg1_slot
+			%arg2 = load i32, i32* %arg2_slot
+			%arg3 = load i32, i32* %arg3_slot
+			ret void
+		}
+		define void @incomplete_caller() {
+			%arg1_slot = alloca i32
+			%arg2_slot = alloca i32
+			store i32 11, i32* %arg1_slot
+			store i32 22, i32* %arg2_slot
+			call void @consume()
+			ret void
+		}
+		define void @complete_caller() {
+			%arg1_slot = alloca i32
+			%arg2_slot = alloca i32
+			%arg3_slot = alloca i32
+			store i32 11, i32* %arg1_slot
+			store i32 22, i32* %arg2_slot
+			store i32 33, i32* %arg3_slot
+			call void @consume()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"locals" : [
+					{
+						"name" : "arg1_slot",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "arg2_slot",
+						"storage" : { "type" : "stack", "value" : 8 }
+					},
+					{
+						"name" : "arg3_slot",
+						"storage" : { "type" : "stack", "value" : 12 }
+					}
+				]
+			},
+			{
+				"name" : "incomplete_caller",
+				"locals" : [
+					{
+						"name" : "arg1_slot",
+						"storage" : { "type" : "stack", "value" : -8 }
+					},
+					{
+						"name" : "arg2_slot",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			},
+			{
+				"name" : "complete_caller",
+				"locals" : [
+					{
+						"name" : "arg1_slot",
+						"storage" : { "type" : "stack", "value" : -12 }
+					},
+					{
+						"name" : "arg2_slot",
+						"storage" : { "type" : "stack", "value" : -8 }
+					},
+					{
+						"name" : "arg3_slot",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	EXPECT_EQ(3u, consume->arg_size());
+	for (auto& argument : consume->args())
+	{
+		EXPECT_TRUE(argument.getType()->isIntegerTy(32));
+	}
+}
+
+TEST_F(ParamReturnTests, x86PreservesUnusedMiddleStackArgumentPosition)
+{
+	parseInput(R"(
+		define void @consume() {
+			%first_slot = alloca i32
+			%third_slot = alloca i32
+			%first = load i32, i32* %first_slot
+			%third = load i32, i32* %third_slot
+			ret void
+		}
+		define void @caller() {
+			%first_slot = alloca i32
+			%unused_slot = alloca i32
+			%third_slot = alloca i32
+			store i32 11, i32* %first_slot
+			store i32 22, i32* %unused_slot
+			store i32 33, i32* %third_slot
+			call void @consume()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "consume",
+				"locals" : [
+					{
+						"name" : "first_slot",
+						"storage" : { "type" : "stack", "value" : 4 }
+					},
+					{
+						"name" : "third_slot",
+						"storage" : { "type" : "stack", "value" : 12 }
+					}
+				]
+			},
+			{
+				"name" : "caller",
+				"locals" : [
+					{
+						"name" : "first_slot",
+						"storage" : { "type" : "stack", "value" : -12 }
+					},
+					{
+						"name" : "unused_slot",
+						"storage" : { "type" : "stack", "value" : -8 }
+					},
+					{
+						"name" : "third_slot",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(3u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_FALSE((argument++)->use_empty());
+	EXPECT_TRUE((argument++)->use_empty());
+	EXPECT_FALSE(argument->use_empty());
+}
+
 TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 {
 	parseInput(R"(

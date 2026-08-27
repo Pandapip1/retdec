@@ -1173,6 +1173,10 @@ IrModifier::FunctionPair IrModifier::modifyFunction(
 	{
 		auto* a = &(*aIt);
 		auto* v = *asIt;
+		if (v == nullptr)
+		{
+			continue;
+		}
 
 		assert(v->getType()->isPointerTy());
 		auto* conv = IrModifier::convertValueToType(
