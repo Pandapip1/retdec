@@ -463,6 +463,78 @@ bool constantIsGuestAddress(Constant* constant, uint32_t address)
 	return false;
 }
 
+bool isNativeEntryPoint(const Config* config, const common::Function* function)
+{
+	if (config == nullptr || function == nullptr || function->getStart().isUndefined())
+	{
+		return false;
+	}
+
+	const auto& parameters = config->getConfig().parameters;
+	const auto start = function->getStart();
+	if (function->isExported()
+			|| parameters.getEntryPoint() == start
+			|| parameters.getMainAddress() == start
+			|| parameters.selectedFunctions.count(function->getName()) != 0
+			|| (!function->getRealName().empty()
+					&& parameters.selectedFunctions.count(function->getRealName()) != 0))
+	{
+		return true;
+	}
+
+	for (const auto& range : parameters.selectedRanges)
+	{
+		if (range.getStart() == start)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool localizePrivateFunctions(Module* module, Config* config)
+{
+	// A lifted image's private implementation functions are not process-wide
+	// ELF symbols.  Keeping recovered CRT names externally visible makes two
+	// independent PE images impossible to llvm-link.  Exact selection starts
+	// are native adapter entry points, while functions merely contained in a
+	// selected decode range remain image-local.
+	const auto& parameters = config->getConfig().parameters;
+	bool hasNativeEntry = parameters.getEntryPoint().isDefined()
+			|| parameters.getMainAddress().isDefined()
+			|| !parameters.selectedFunctions.empty()
+			|| !parameters.selectedRanges.empty();
+	for (Function& function : *module)
+	{
+		auto* configured = config->getConfigFunction(&function);
+		hasNativeEntry = hasNativeEntry
+				|| (configured != nullptr && configured->isExported());
+	}
+	if (!hasNativeEntry)
+	{
+		return false;
+	}
+
+	bool changed = false;
+	for (Function& function : *module)
+	{
+		if (function.isDeclaration() || !function.hasExternalLinkage())
+		{
+			continue;
+		}
+
+		auto* configured = config->getConfigFunction(&function);
+		if (configured == nullptr || isNativeEntryPoint(config, configured))
+		{
+			continue;
+		}
+
+		function.setLinkage(GlobalValue::InternalLinkage);
+		changed = true;
+	}
+	return changed;
+}
+
 } // anonymous namespace
 
 bool Pe32PointerBridge::run()
@@ -477,6 +549,7 @@ bool Pe32PointerBridge::run()
 
 	auto& context = _module->getContext();
 	auto* int32 = Type::getInt32Ty(context);
+	bool changed = localizePrivateFunctions(_module, _config);
 	// Record this before generating the constructor: passing a function to the
 	// registration runtime is itself address-taking and must not make every
 	// decoded direct-call-only function look like a required indirect target.
@@ -488,7 +561,7 @@ bool Pe32PointerBridge::run()
 			functionsNeedingMappings.insert(&function);
 		}
 	}
-	bool changed = materializePointerConstantExpressions(_module);
+	changed |= materializePointerConstantExpressions(_module);
 	std::vector<PointerCellInitializer> pointerInitializers;
 	for (GlobalVariable& global : _module->globals())
 	{

@@ -9,6 +9,9 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Transforms/IPO.h>
 
+#include <algorithm>
+#include <iterator>
+
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
 
@@ -430,6 +433,131 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_NE(nullptr, module->getFunction("kept"));
 	EXPECT_NE(nullptr, module->getFunction("raw.target"));
 	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeKeepsRequestedEntriesPublicAndIsolatesRecoveredHelpersPerImage)
+{
+	auto createImage = [this](
+			StringRef moduleName,
+			StringRef rootName,
+			StringRef objectName,
+			StringRef exportedName,
+			uint32_t addressBase)
+	{
+		auto image = std::make_unique<Module>(moduleName, context);
+		image->setDataLayout("e-p:32:32:32-f80:32:32");
+		auto* functionType = FunctionType::get(
+				Type::getVoidTy(context), false);
+		auto defineFunction = [&](StringRef name)
+		{
+			auto* function = Function::Create(
+					functionType, GlobalValue::ExternalLinkage, name, image.get());
+			auto* block = BasicBlock::Create(context, "entry", function);
+			ReturnInst::Create(context, block);
+			return function;
+		};
+
+		auto* root = defineFunction(rootName);
+		auto* exported = defineFunction(exportedName);
+		std::vector<Function*> helpers;
+		for (StringRef name : {"__NMSG_WRITE", "__fload_withFB",
+				"__heap_alloc", "__nh_malloc", "_malloc"})
+		{
+			helpers.push_back(defineFunction(name));
+		}
+		auto* object = new GlobalVariable(
+				*image,
+				Type::getInt32Ty(context),
+				false,
+				GlobalValue::InternalLinkage,
+				ConstantInt::get(Type::getInt32Ty(context), 0),
+				objectName);
+
+		auto config = Config::empty(image.get());
+		config.getConfig().architecture.setIsX86();
+		config.getConfig().architecture.setBitSize(32);
+		config.getConfig().architecture.setIsEndianLittle();
+		config.getConfig().fileFormat.setIsPe32();
+		config.insertFunction(root, addressBase, addressBase + 0x10);
+		config.getConfig().parameters.selectedRanges.insert(
+				retdec::common::AddressRange(addressBase, addressBase + 0x100));
+		auto* exportedConfig = const_cast<retdec::common::Function*>(
+				config.insertFunction(
+					exported, addressBase + 0x100, addressBase + 0x110));
+		exportedConfig->setIsExported(true);
+		for (std::size_t i = 0; i < helpers.size(); ++i)
+		{
+			config.insertFunction(
+					helpers[i], addressBase + 0x20 + i * 0x10,
+					addressBase + 0x30 + i * 0x10);
+		}
+		config.getConfig().globals.insert(retdec::common::Object(
+				objectName.str(),
+				retdec::common::Storage::inMemory(addressBase + 0x200)));
+
+		Pe32PointerBridge imageBridge;
+		EXPECT_TRUE(imageBridge.runOnModuleCustom(*image, &config));
+		EXPECT_TRUE(root->hasExternalLinkage());
+		EXPECT_TRUE(exported->hasExternalLinkage());
+		for (Function* helper : helpers)
+		{
+			EXPECT_TRUE(helper->hasInternalLinkage());
+		}
+		auto* initializer = image->getFunction(
+				"__retdec_pe32_initialize_mappings");
+		EXPECT_NE(nullptr, initializer);
+		EXPECT_TRUE(initializer->hasInternalLinkage());
+		EXPECT_FALSE(verifyModule(*image, &errs()));
+		(void)object;
+		return image;
+	};
+
+	auto first = createImage("first", "root.first", "object.first",
+			"export.first", 0x401000);
+	auto second = createImage("second", "root.second", "object.second",
+			"export.second", 0x501000);
+	std::set<std::string> firstExternalDefinitions;
+	std::set<std::string> secondExternalDefinitions;
+	auto auditImage = [](
+			Module& image,
+			std::set<std::string>& externalDefinitions)
+	{
+		unsigned recoveredHelpers = 0;
+		unsigned mappingInitializers = 0;
+		for (Function& function : image)
+		{
+			if (!function.isDeclaration() && function.hasExternalLinkage())
+			{
+				externalDefinitions.insert(function.getName().str());
+			}
+			recoveredHelpers += function.getName().startswith("__NMSG_WRITE")
+					|| function.getName().startswith("__fload_withFB")
+					|| function.getName().startswith("__heap_alloc")
+					|| function.getName().startswith("__nh_malloc")
+					|| function.getName().startswith("_malloc");
+			mappingInitializers += function.getName().startswith(
+					"__retdec_pe32_initialize_mappings");
+		}
+		EXPECT_EQ(5u, recoveredHelpers);
+		EXPECT_EQ(1u, mappingInitializers);
+		auto* constructors = image.getGlobalVariable("llvm.global_ctors");
+		ASSERT_NE(nullptr, constructors);
+		auto* constructorArray = dyn_cast<ConstantArray>(
+				constructors->getInitializer());
+		ASSERT_NE(nullptr, constructorArray);
+		EXPECT_EQ(1u, constructorArray->getNumOperands());
+	};
+	auditImage(*first, firstExternalDefinitions);
+	auditImage(*second, secondExternalDefinitions);
+	std::vector<std::string> collisions;
+	std::set_intersection(
+			firstExternalDefinitions.begin(), firstExternalDefinitions.end(),
+			secondExternalDefinitions.begin(), secondExternalDefinitions.end(),
+			std::back_inserter(collisions));
+	EXPECT_TRUE(collisions.empty());
+	EXPECT_FALSE(verifyModule(*first, &errs()));
+	EXPECT_FALSE(verifyModule(*second, &errs()));
 }
 
 TEST_F(Pe32PointerLegalizationTests,
