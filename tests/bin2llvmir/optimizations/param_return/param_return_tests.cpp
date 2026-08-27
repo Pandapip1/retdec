@@ -453,6 +453,88 @@ TEST_F(ParamReturnTests, x86ExternalCallUnresolvedUnaryPushIsNotDropped)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86RepeatedImmediatePushesIgnoreUnrelatedByteLocal)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare i32 @consume()
+		define void @fnc(i1 %take_second) {
+			%unrelated = alloca i8
+			store i8 0, i8* %unrelated
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 5, i32* %slot1
+			store i32 %sp1, i32* @esp
+			call i32 @consume()
+			%cleanup1 = load i32, i32* @esp
+			%restored1 = add i32 %cleanup1, 4
+			store i32 %restored1, i32* @esp
+			br i1 %take_second, label %second, label %done
+		second:
+			%sp2 = load i32, i32* @esp
+			%sp3 = sub i32 %sp2, 4
+			%slot2 = inttoptr i32 %sp3 to i32*
+			store i32 5, i32* %slot2
+			store i32 %sp3, i32* @esp
+			call i32 @consume()
+			%cleanup2 = load i32, i32* @esp
+			%restored2 = add i32 %cleanup2, 4
+			store i32 %restored2, i32* @esp
+			br label %done
+		done:
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "fnc",
+				"locals" : [
+					{
+						"name" : "unrelated",
+						"storage" : { "type" : "stack", "value" : -28 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(1u, consume->arg_size());
+	unsigned recoveredCalls = 0;
+	for (BasicBlock& block : *module->getFunction("fnc"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr || call->getCalledFunction() != consume)
+		{
+			continue;
+		}
+		++recoveredCalls;
+		ASSERT_EQ(1u, call->getNumArgOperands());
+		auto* argument = dyn_cast<ConstantInt>(call->getArgOperand(0));
+		ASSERT_NE(nullptr, argument);
+		EXPECT_TRUE(argument->equalsInt(5));
+	}
+	EXPECT_EQ(2u, recoveredCalls);
+}
+
 TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 {
 	parseInput(R"(
