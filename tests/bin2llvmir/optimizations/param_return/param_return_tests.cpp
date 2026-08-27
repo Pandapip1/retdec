@@ -5,6 +5,7 @@
 */
 
 #include "retdec/bin2llvmir/optimizations/param_return/param_return.h"
+#include "retdec/bin2llvmir/optimizations/stack_pointer_ops/stack_pointer_ops.h"
 #include "bin2llvmir/utils/llvmir_tests.h"
 
 using namespace ::testing;
@@ -862,8 +863,35 @@ TEST_F(ParamReturnTests, x86PreservesUnusedMiddleStackArgumentPosition)
 	ASSERT_EQ(3u, consume->arg_size());
 	auto argument = consume->arg_begin();
 	EXPECT_FALSE((argument++)->use_empty());
-	EXPECT_TRUE((argument++)->use_empty());
+	auto* unusedArgument = &*argument++;
+	EXPECT_FALSE(unusedArgument->use_empty());
 	EXPECT_FALSE(argument->use_empty());
+
+	// Although the middle argument has no semantic use in the original body,
+	// its physical cdecl slot must exist.  A wider address-taken view beginning
+	// at arg1 is allowed to span the contiguous arg1/arg2 DWORDs.
+	auto* unusedSlot = config.getLlvmStackVariable(consume, 8);
+	ASSERT_NE(nullptr, unusedSlot);
+	bool storesUnusedArgument = false;
+	for (auto* user : unusedArgument->users())
+	{
+		if (auto* store = dyn_cast<StoreInst>(user))
+		{
+			storesUnusedArgument |= store->getPointerOperand() == unusedSlot;
+		}
+	}
+	EXPECT_TRUE(storesUnusedArgument);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
+	EXPECT_EQ(12u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	EXPECT_EQ(4, config.getStackVariableOffset(
+			getValueByName("first_slot.frame")).getValue());
+	EXPECT_EQ(8, config.getStackVariableOffset(
+			getValueByName("stack_var_8.frame")).getValue());
+	EXPECT_EQ(12, config.getStackVariableOffset(
+			getValueByName("third_slot.frame")).getValue());
 }
 
 TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)

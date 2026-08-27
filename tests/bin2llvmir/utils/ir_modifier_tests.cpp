@@ -336,6 +336,40 @@ TEST_F(IrModifierTests, changeGlobalObjectTypePreservesDecodedAccessWidths)
 	EXPECT_TRUE(load->getPointerOperand()->getType()->getPointerElementType()->isIntegerTy(32));
 }
 
+TEST_F(IrModifierTests, changeStackObjectTypePreservesOverlappingDecodedAccessWidths)
+{
+	parseInput(R"(
+		define i32 @fnc(i32 %value) {
+			%stack_object = alloca i32
+			store i32 %value, i32* %stack_object
+			%loaded = load i32, i32* %stack_object
+			ret i32 %loaded
+		}
+	)");
+	auto config = Config::empty(module.get());
+	auto* stackObject = cast<AllocaInst>(getValueByName("stack_object"));
+	IrModifier modifier(module.get(), &config);
+	auto* changed = cast<AllocaInst>(modifier.changeObjectType(
+			nullptr,
+			stackObject,
+			Type::getDoubleTy(context),
+			nullptr,
+			nullptr,
+			false,
+			false,
+			true));
+
+	EXPECT_TRUE(changed->getAllocatedType()->isDoubleTy());
+	auto* store = getNthInstruction<StoreInst>();
+	EXPECT_TRUE(store->getValueOperand()->getType()->isIntegerTy(32));
+	EXPECT_TRUE(store->getPointerOperand()->getType()
+			->getPointerElementType()->isIntegerTy(32));
+	auto* load = getNthInstruction<LoadInst>();
+	EXPECT_TRUE(load->getType()->isIntegerTy(32));
+	EXPECT_TRUE(load->getPointerOperand()->getType()
+			->getPointerElementType()->isIntegerTy(32));
+}
+
 TEST_F(IrModifierTests, getStackVariableWidensExistingAddressAnchor)
 {
 	parseInput(R"(

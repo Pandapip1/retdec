@@ -63,6 +63,65 @@ TEST_F(StackAnalysisTests, reconstructsIndexedFrameRelativeStackObject)
 	EXPECT_NE(nullptr, getValueByName("pointer.stack"));
 }
 
+TEST_F(StackAnalysisTests, preservesOverlappingQwordAndDwordAccessWidths)
+{
+	parseInput(R"(
+		@ebp = global i32 0
+		define i32 @func(i32 %index, double %value) {
+			%stack_var_-12 = alloca i32
+			%stack_var_-4 = alloca i32
+			%anchor = ptrtoint i32* %stack_var_-4 to i32
+			store i32 %anchor, i32* @ebp
+			%base1 = load i32, i32* @ebp
+			%scaled1 = mul i32 %index, 4
+			%displaced1 = add i32 %scaled1, -8
+			%address1 = add i32 %base1, %displaced1
+			%qword = inttoptr i32 %address1 to double*
+			store double %value, double* %qword
+			%base2 = load i32, i32* @ebp
+			%scaled2 = mul i32 %index, 4
+			%displaced2 = add i32 %scaled2, -8
+			%address2 = add i32 %base2, %displaced2
+			%dword = inttoptr i32 %address2 to i32*
+			%low = load i32, i32* %dword
+			ret i32 %low
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().registers.insert(retdec::config::Object(
+			"ebp", retdec::config::Storage::inRegister("ebp")));
+	auto function = retdec::config::Function("func");
+	function.locals.insert(retdec::config::Object(
+			"stack_var_-12", retdec::config::Storage::onStack(-12)));
+	function.locals.insert(retdec::config::Object(
+			"stack_var_-4", retdec::config::Storage::onStack(-4)));
+	config.getConfig().functions.insert(function);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+
+	auto changed = pass.runOnModuleCustom(*module, &config, abi);
+	EXPECT_TRUE(changed);
+	auto* stackObject = cast<AllocaInst>(getValueByName("stack_var_-12"));
+	EXPECT_TRUE(stackObject->getAllocatedType()->isIntegerTy(32));
+	StoreInst* qwordStore = nullptr;
+	for (BasicBlock& block : *module->getFunction("func"))
+	for (Instruction& instruction : block)
+	{
+		auto* store = dyn_cast<StoreInst>(&instruction);
+		if (store != nullptr && store->getValueOperand()->getType()->isDoubleTy())
+		{
+			qwordStore = store;
+		}
+	}
+	ASSERT_NE(nullptr, qwordStore);
+	EXPECT_TRUE(qwordStore->getPointerOperand()->getType()
+			->getPointerElementType()->isDoubleTy());
+	auto* low = cast<LoadInst>(getValueByName("low"));
+	EXPECT_TRUE(low->getType()->isIntegerTy(32));
+	EXPECT_TRUE(low->getPointerOperand()->getType()
+			->getPointerElementType()->isIntegerTy(32));
+}
+
 TEST_F(StackAnalysisTests, reconstructsTwoObjectsWithoutReplacingSharedFrameBase)
 {
 	parseInput(R"(
@@ -149,7 +208,9 @@ TEST_F(StackAnalysisTests, coalescesIndexedAndFixedStackObjectViews)
 	StackFrameCoalescing lowerFrame;
 	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
 	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
-	EXPECT_EQ(232u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	// The indexed pointer escapes scalar-object reasoning, so retain the whole
+	// native local-frame interval through saved EBP at offset -4.
+	EXPECT_EQ(772u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
 	EXPECT_EQ(4u, frame->getAlignment());
 	auto* firstMember = getValueByName("stack_var_-776.frame");
 	auto* secondMember = getValueByName("stack_var_-772.frame");
@@ -304,7 +365,9 @@ TEST_F(StackAnalysisTests, coalescesDisjointViewsOfAddressEscapedStackOutput)
 	StackFrameCoalescing lowerFrame;
 	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
 	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
-	EXPECT_EQ(7u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	// The escaped pointer can name an aggregate extending through the end of
+	// the native local frame (saved EBP begins at offset -4).
+	EXPECT_EQ(20u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
 	auto* start = getValueByName("output_start.frame");
 	auto* member = getValueByName("output_member.frame.addr");
 	ASSERT_NE(nullptr, start);
@@ -329,6 +392,33 @@ TEST_F(StackAnalysisTests, coalescesDisjointViewsOfAddressEscapedStackOutput)
 	ASSERT_NE(nullptr, memberLoad);
 	EXPECT_EQ(start, outputCall->getArgOperand(0));
 	EXPECT_EQ(member, memberLoad->getPointerOperand());
+}
+
+TEST_F(StackAnalysisTests, reservesNativeLocalFrameForEscapedScalarAnchor)
+{
+	parseInput(R"(
+		declare void @copy_into(i8*, i32)
+		define void @func() {
+			%stack_var_-84 = alloca i32
+			%destination = bitcast i32* %stack_var_-84 to i8*
+			call void @copy_into(i8* %destination, i32 80)
+			ret void
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	auto function = retdec::config::Function("func");
+	function.locals.insert(retdec::config::Object(
+			"stack_var_-84", retdec::config::Storage::onStack(-84)));
+	config.getConfig().functions.insert(function);
+
+	StackFrameCoalescing lowerFrame;
+	EXPECT_TRUE(lowerFrame.runOnModuleCustom(*module, &config));
+	auto* frame = cast<AllocaInst>(getValueByName("stack_frame"));
+	EXPECT_EQ(80u, cast<ArrayType>(frame->getAllocatedType())->getNumElements());
+	auto* destination = cast<BitCastInst>(getValueByName("destination"));
+	EXPECT_EQ(getValueByName("stack_var_-84.frame"),
+			destination->getOperand(0));
 }
 
 TEST_F(StackAnalysisTests, keepsIndexedAddressWhenFrameBaseIsAmbiguous)

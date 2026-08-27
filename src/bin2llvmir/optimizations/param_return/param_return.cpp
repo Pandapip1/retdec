@@ -1865,6 +1865,35 @@ void DataFlowEntry::applyToIrOrdinary()
 			}
 		}
 
+		if (_config->getConfig().architecture.isX86_32()
+				&& !fnc->isDeclaration())
+		{
+			// A recovered cdecl signature describes physical DWORD slots in the
+			// incoming stack frame.  Do not leave an unused parameter as a hole:
+			// later code may address a wider object through an adjacent used slot
+			// (for example, a QWORD beginning at arg1 and spanning arg2).  Separate
+			// allocas for every ABI slot are subsequently put back into one
+			// byte-addressable frame by StackFrameCoalescing.
+			IrModifier modifier(_module, _config);
+			uint64_t slotSize =
+					_config->getConfig().architecture.getByteSize();
+			int64_t offset = slotSize;
+			for (std::size_t argument = 0;
+					argument < argStores.size(); ++argument)
+			{
+				if (argStores[argument] == nullptr)
+				{
+					argStores[argument] = modifier.getStackVariable(
+							fnc, offset, argTypes[argument]).first;
+				}
+				uint64_t size = _module->getDataLayout().getTypeStoreSize(
+						argTypes[argument]);
+				offset += std::max<uint64_t>(
+						slotSize,
+						((size + slotSize - 1) / slotSize) * slotSize);
+			}
+		}
+
 		static std::vector<std::string> ppcNames =
 				{"r3", "r4", "r5", "r6", "r7", "r8", "r9"};
 		static std::vector<std::string> armNames =

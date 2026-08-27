@@ -86,7 +86,8 @@ class IrModifier
 				llvm::Constant* init = nullptr,
 				std::unordered_set<llvm::Instruction*>* instToErase = nullptr,
 				bool dbg = false,
-				bool wideString = false);
+				bool wideString = false,
+				bool preserveAccessWidths = false);
 
 		FunctionPair modifyFunction(
 				llvm::Function* fnc,
