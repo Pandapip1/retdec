@@ -176,7 +176,8 @@ TEST_F(StackPointerOpsRemoveTests, removesDeadPopIntoRegisterLocalizationAlloca)
 			ret void
 		}
 	)");
-	auto* localized = cast<AllocaInst>(getValueByName("esi.local"));
+	auto* localized = llvm::cast<llvm::AllocaInst>(
+			getValueByName("esi.local"));
 	localized->setName("esi");
 	auto c = Config::empty(module.get());
 	AbiX86 abi(module.get(), &c);
