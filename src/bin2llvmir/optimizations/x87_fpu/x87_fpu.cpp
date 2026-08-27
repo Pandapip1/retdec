@@ -5,6 +5,7 @@
 */
 
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Operator.h>
 
@@ -182,65 +183,15 @@ bool X87FpuAnalysis::analyzeBb(
 					<< " @ " << fIt->second << " - " << ci->getZExtValue() << " = "
 					<< tmp << std::endl;
 		}
-		else if (callStore
-				&& topVals.find(callStore->getArgOperand(0)) != topVals.end())
+		else if (callStore)
 		{
-			auto fIt = topVals.find(callStore->getArgOperand(0));
-			int tmp = fIt->second;
-
-			auto regBase = _config->isLlvmX87DataStorePseudoFunctionCall(callStore)
-					? uint32_t(X86_REG_ST0)
-					: uint32_t(X87_REG_TAG0);
-			// Storing value to an empty stack -> suspicious.
-			if (tmp == 8)
-			{
-				tmp = 7;
-				topVal = 7;
-			}
-			int regNum = tmp % 8;
-			auto* reg = _abi->getRegister(regBase + regNum);
-
-			LOG << "\t\t\t" << "store -- " << reg->getName().str() << std::endl;
-
-			new StoreInst(callStore->getArgOperand(1), reg, callStore);
-			callStore->eraseFromParent();
+			lowerStore(callStore);
 			changed = true;
 		}
-		else if (callLoad
-				&& topVals.find(callLoad->getArgOperand(0)) != topVals.end())
+		else if (callLoad)
 		{
-			auto fIt = topVals.find(callLoad->getArgOperand(0));
-			int tmp = fIt->second;
-
-			auto regBase = _config->isLlvmX87DataLoadPseudoFunctionCall(callLoad)
-					? uint32_t(X86_REG_ST0)
-					: uint32_t(X87_REG_TAG0);
-			// Loading value from an empty stack -> value may have been placed
-			// there without us knowing, e.g. return value of some other
-			// function.
-			if (tmp == 8)
-			{
-				tmp = 7;
-				topVal = 7;
-			}
-			int regNum = tmp % 8;
-			auto* reg = _abi->getRegister(regBase + regNum);
-
-			LOG << "\t\t\t" << "load -- " << reg->getName().str() << std::endl;
-
-			auto* l = new LoadInst(reg, "", callLoad);
-			auto* conv = IrModifier::convertValueToType(l, callLoad->getType(), callLoad);
-
-			callLoad->replaceAllUsesWith(conv);
-			callLoad->eraseFromParent();
+			lowerLoad(callLoad);
 			changed = true;
-		}
-		else if (callStore || callLoad)
-		{
-			LOG << "\t\t" << AsmInstruction(i).getAddress() << " @ "
-					<< llvmObjToString(i) << std::endl;
-			assert(false && "some other pattern");
-			return false;
 		}
 	}
 
@@ -251,6 +202,70 @@ bool X87FpuAnalysis::analyzeBb(
 	}
 
 	return changed;
+}
+
+void X87FpuAnalysis::lowerStore(llvm::CallInst* call)
+{
+	auto regBase = _config->isLlvmX87DataStorePseudoFunctionCall(call)
+			? uint32_t(X86_REG_ST0)
+			: uint32_t(X87_REG_TAG0);
+	auto* index = call->getArgOperand(0);
+	auto* value = call->getArgOperand(1);
+	IRBuilder<> irb(call);
+
+	// TOP is runtime state and may be changed by a callee.  Store through the
+	// actual index instead of assigning a physical register from intraprocedural
+	// TOP tracking.  Selects avoid introducing control-flow into decoded blocks.
+	for (unsigned regNum = 0; regNum < 8; ++regNum)
+	{
+		auto* reg = _abi->getRegister(regBase + regNum);
+		assert(reg);
+		auto* oldValue = irb.CreateLoad(reg);
+		auto* converted = IrModifier::convertValueToType(
+				value, reg->getValueType(), call);
+		auto* selected = irb.CreateSelect(
+				irb.CreateICmpEQ(index, ConstantInt::get(index->getType(), regNum)),
+				converted,
+				oldValue);
+		irb.CreateStore(selected, reg);
+	}
+
+	call->eraseFromParent();
+}
+
+void X87FpuAnalysis::lowerLoad(llvm::CallInst* call)
+{
+	auto regBase = _config->isLlvmX87DataLoadPseudoFunctionCall(call)
+			? uint32_t(X86_REG_ST0)
+			: uint32_t(X87_REG_TAG0);
+	auto* index = call->getArgOperand(0);
+	IRBuilder<> irb(call);
+	Value* result = nullptr;
+
+	// Select the register using the live TOP value.  This preserves x87 values
+	// passed implicitly across function calls, including callees which pop TOP.
+	for (unsigned regNum = 0; regNum < 8; ++regNum)
+	{
+		auto* reg = _abi->getRegister(regBase + regNum);
+		assert(reg);
+		auto* loaded = irb.CreateLoad(reg);
+		auto* converted = IrModifier::convertValueToType(
+				loaded, call->getType(), call);
+		if (result == nullptr)
+		{
+			result = converted;
+		}
+		else
+		{
+			result = irb.CreateSelect(
+					irb.CreateICmpEQ(index, ConstantInt::get(index->getType(), regNum)),
+					converted,
+					result);
+		}
+	}
+
+	call->replaceAllUsesWith(result);
+	call->eraseFromParent();
 }
 
 } // namespace bin2llvmir

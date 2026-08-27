@@ -37,6 +37,8 @@ class X87FpuAnalysis : public llvm::ModulePass
 				std::map<llvm::Value*, int>& topVals,
 				llvm::BasicBlock* bb,
 				int topVal);
+		void lowerStore(llvm::CallInst* call);
+		void lowerLoad(llvm::CallInst* call);
 
 	private:
 		llvm::Module* _module = nullptr;
