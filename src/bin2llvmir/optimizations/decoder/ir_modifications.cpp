@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <new>
 
-#include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
 using namespace llvm;
@@ -700,7 +699,6 @@ llvm::Function* Decoder::splitFunctionOn(
 void Decoder::inlineSharedTailBranches()
 {
 	std::set<Function*> inlinedTails;
-	AssumptionCacheTracker assumptions;
 	for (const auto& split : _splitBranchCalls)
 	{
 		auto* call = split.call;
@@ -736,7 +734,7 @@ void Decoder::inlineSharedTailBranches()
 				UndefValue::get(caller->getReturnType()),
 				terminator);
 		terminator->eraseFromParent();
-		InlineFunctionInfo info(nullptr, &assumptions);
+		InlineFunctionInfo info;
 		if (!InlineFunction(call, info))
 		{
 			continue;

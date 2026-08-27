@@ -56,13 +56,14 @@ TEST_F(DecoderTests, unresolvedComputedCallIsPreservedAsIndirectCall)
 		  ret void
 		}
 	)");
-	auto config = Config::fromJsonString(module.get(), R"({
+	auto configJson = config::Config::fromJsonString(R"({
 		"architecture" : {
 			"bitSize" : 32,
 			"endian" : "little",
 			"name" : "x86"
 		}
 	})");
+	auto config = Config::fromConfig(module.get(), configJson);
 
 	auto* caller = module->getFunction("caller");
 	auto* pseudo = dyn_cast<CallInst>(&caller->getEntryBlock().front());
