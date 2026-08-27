@@ -8,6 +8,7 @@ add_executable(tests-bin2llvmir
 	optimizations/inst_opt/inst_opt_tests.cpp
 	optimizations/main_detection/main_detection_tests.cpp
 	optimizations/param_return/param_return_tests.cpp
+	optimizations/register_localization/register_localization_tests.cpp
 	optimizations/stack_pointer_ops/stack_pointer_ops_tests.cpp
 	optimizations/unreachable_funcs/unreachable_funcs_tests.cpp
 	optimizations/value_protect/value_protect_test.cpp
