@@ -10963,6 +10963,43 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FIADD_m16)
 }
 
 //
+// X86_INS_FNSTCW, X86_INS_FLDCW
+//
+
+// D9 /7  FNSTCW m16  Store the reset x87 control word to memory.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FNSTCW_reset)
+{
+	ALL_MODES;
+
+	emulate("fnstcw word ptr [0x1234]");
+
+	EXPECT_NO_MEMORY_LOADED();
+	EXPECT_JUST_MEMORY_STORED({
+		{0x1234, 0x037f_w},
+	});
+	EXPECT_NO_VALUE_CALLED();
+}
+
+// D9 /5 + D9 /7  FLDCW/FNSTCW must preserve all represented nondefault bits,
+// normalize reserved bit 6 to one, and leave other reserved bits zero.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FLDCW_FNSTCW_roundtrip)
+{
+	ALL_MODES;
+
+	setMemory({
+		{0x1234, 0x1515_w},
+	});
+
+	emulate("fldcw word ptr [0x1234]; fnstcw word ptr [0x5678]");
+
+	EXPECT_JUST_MEMORY_LOADED({0x1234});
+	EXPECT_JUST_MEMORY_STORED({
+		{0x5678, 0x1555_w},
+	});
+	EXPECT_NO_VALUE_CALLED();
+}
+
+//
 // X86_INS_FNSTSW
 //
 
