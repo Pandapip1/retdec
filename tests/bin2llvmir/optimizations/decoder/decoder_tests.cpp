@@ -168,6 +168,60 @@ TEST_F(DecoderTests, branchesFromMultipleEntriesInlineSharedTailState)
 	EXPECT_TRUE(module->getFunction("shared_tail")->hasInternalLinkage());
 }
 
+TEST_F(DecoderTests, conditionalTailTransferReturnsInsteadOfFallingThrough)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@eax = global i32 0
+
+		define i32 @tail() {
+		entry:
+		  %sp = load i32, i32* @esp
+		  store i32 %sp, i32* @eax
+		  ret i32 undef
+		}
+
+		define i32 @caller(i1 %condition) {
+		entry:
+		  br i1 %condition, label %taken, label %fallthrough
+		taken:
+		  %result = call i32 @tail()
+		  br label %fallthrough
+		fallthrough:
+		  store i32 42, i32* @eax
+		  ret i32 undef
+		}
+	)");
+
+	auto* caller = module->getFunction("caller");
+	auto takenIt = caller->begin();
+	++takenIt;
+	auto* taken = &*takenIt;
+	auto* call = dyn_cast<CallInst>(&taken->front());
+	ASSERT_NE(nullptr, call);
+
+	Decoder decoder;
+	inlineSharedTailBranches(decoder, {{call, nullptr}});
+
+	EXPECT_EQ(
+			1u,
+			std::distance(
+					pred_begin(&caller->back()), pred_end(&caller->back())));
+	unsigned tailLoads = 0;
+	unsigned returns = 0;
+	for (auto& block : *caller)
+	for (auto& instruction : block)
+	{
+		tailLoads += isa<LoadInst>(&instruction)
+				&& cast<LoadInst>(&instruction)->getPointerOperand()
+						== module->getGlobalVariable("esp");
+		returns += isa<ReturnInst>(&instruction);
+	}
+	EXPECT_EQ(1u, tailLoads);
+	EXPECT_EQ(2u, returns);
+	EXPECT_TRUE(module->getFunction("tail")->use_empty());
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
