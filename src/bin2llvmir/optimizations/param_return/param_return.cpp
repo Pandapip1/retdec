@@ -385,38 +385,38 @@ void CallEntry::filterSort(Config* _config)
 	// paired stack-pointer update. Its backwards scan already encounters x86
 	// pushes in argument order, while sorting an unresolved store as if it were
 	// a register would move it to an arbitrary position.
-	if (_config->getConfig().architecture.isX86()
-			&& !unresolvedStackArgStores.empty())
+	bool preserveRecoveredX86Order =
+			_config->getConfig().architecture.isX86()
+			&& !unresolvedStackArgStores.empty();
+	if (!preserveRecoveredX86Order)
 	{
-		return;
+		std::stable_sort(
+				stores.begin(),
+				stores.end(),
+				[_config](StoreInst* a, StoreInst* b) -> bool
+		{
+			auto aOff = _config->getStackVariableOffset(a->getPointerOperand());
+			auto bOff = _config->getStackVariableOffset(b->getPointerOperand());
+
+			if (aOff.isUndefined() && bOff.isUndefined())
+			{
+				return _config->getConfigRegisterNumber(a->getPointerOperand()) <
+						_config->getConfigRegisterNumber(b->getPointerOperand());
+			}
+			else if (aOff.isUndefined() && bOff.isDefined())
+			{
+				return true;
+			}
+			else if (aOff.isDefined() && bOff.isUndefined())
+			{
+				return false;
+			}
+			else
+			{
+				return aOff < bOff;
+			}
+		});
 	}
-
-	std::stable_sort(
-			stores.begin(),
-			stores.end(),
-			[_config](StoreInst* a, StoreInst* b) -> bool
-	{
-		auto aOff = _config->getStackVariableOffset(a->getPointerOperand());
-		auto bOff = _config->getStackVariableOffset(b->getPointerOperand());
-
-		if (aOff.isUndefined() && bOff.isUndefined())
-		{
-			return _config->getConfigRegisterNumber(a->getPointerOperand()) <
-					_config->getConfigRegisterNumber(b->getPointerOperand());
-		}
-		else if (aOff.isUndefined() && bOff.isDefined())
-		{
-			return true;
-		}
-		else if (aOff.isDefined() && bOff.isUndefined())
-		{
-			return false;
-		}
-		else
-		{
-			return aOff < bOff;
-		}
-	});
 
 	if (_config->getConfig().architecture.isX86())
 	{
@@ -1203,6 +1203,8 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 	unsigned cleanupBytes = getX86CleanupBytes(call);
 	unsigned nestedCleanupBytes = 0;
 	uint64_t recoveredStackBytes = 0;
+	uint64_t overwrittenReservationBytes = 0;
+	AsmInstruction overwrittenReservationAsm;
 	unsigned x86SlotSize = _config->getConfig().architecture.isX86()
 			? _config->getConfig().architecture.getByteSize() : 0;
 	auto* b = call->getParent();
@@ -1233,9 +1235,47 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		{
 			break;
 		}
+		if (overwrittenReservationBytes != 0
+				&& overwrittenReservationAsm.isValid())
+		{
+			AsmInstruction currentAsm(prev);
+			if (currentAsm.isValid()
+					&& currentAsm.getLlvmToAsmInstruction()
+							!= overwrittenReservationAsm.getLlvmToAsmInstruction())
+			{
+				auto* currentCapstone = currentAsm.getCapstoneInsn();
+				bool isX87ValueProducer = currentCapstone != nullptr
+						&& (currentCapstone->id == X86_INS_FLD
+								|| currentCapstone->id == X86_INS_FLD1
+								|| currentCapstone->id == X86_INS_FLDZ
+								|| currentCapstone->id == X86_INS_FLDPI
+								|| currentCapstone->id == X86_INS_FLDL2E
+								|| currentCapstone->id == X86_INS_FLDL2T
+								|| currentCapstone->id == X86_INS_FLDLG2
+								|| currentCapstone->id == X86_INS_FLDLN2);
+				if (currentCapstone == nullptr
+						|| (currentCapstone->id != X86_INS_PUSH
+								&& !isX87ValueProducer)
+						|| currentAsm.getEndAddress()
+								!= overwrittenReservationAsm.getAddress())
+				{
+					overwrittenReservationBytes = 0;
+					overwrittenReservationAsm = AsmInstruction();
+				}
+				else if (isX87ValueProducer)
+				{
+					// PUSH/PUSH may reserve the QWORD before FLD/FLDZ computes
+					// the value eventually stored by FSTP [ESP].  Preserve the
+					// adjacency chain without consuming reservation bytes.
+					overwrittenReservationAsm = currentAsm;
+				}
+			}
+		}
 
 		if (auto* previousCall = dyn_cast<CallInst>(prev))
 		{
+			overwrittenReservationBytes = 0;
+			overwrittenReservationAsm = AsmInstruction();
 			auto* calledFnc = previousCall->getCalledFunction();
 			if (calledFnc == nullptr || !calledFnc->isIntrinsic())
 			{
@@ -1292,13 +1332,35 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 					? asmInstruction.getCapstoneInsn() : nullptr;
 			isDecodedX86Push = capstone != nullptr
 					&& capstone->id == X86_INS_PUSH;
+			bool isDecodedX86WideStackStore = capstone != nullptr
+					&& (capstone->id == X86_INS_FST
+							|| capstone->id == X86_INS_FSTP)
+					&& _config->isStackVariable(ptr)
+					&& val->getType()->isSized()
+					&& x86SlotSize != 0
+					&& _module->getDataLayout().getTypeStoreSize(
+							val->getType()) > x86SlotSize;
+			// StackAnalysis can fold away the ESP update of an otherwise decoded
+			// PUSH while leaving its memory store at a runtime ESP-derived address.
+			// Machine metadata plus the exact caller cleanup still proves that this
+			// store is an outgoing stack argument.  Treat it like the paired form so
+			// applyToIr() consumes the pushed SSA value instead of synthetic memory.
+			if (isDecodedX86Push && cleanupBytes != 0
+					&& !AsmInstruction::isLlvmToAsmInstruction(store)
+					&& !_config->isStackPointerRegister(ptr)
+					&& !_config->isStackVariable(ptr)
+					&& !_config->isRegister(ptr))
+			{
+				isUnresolvedX86Push = true;
+			}
 
 			// Compilers pass x87 values by reserving a block with SUB ESP and
 			// storing directly through the resulting current ESP.  There is no
 			// PUSH-like store back to ESP for addCallArgs() to pair with.  A matching
 			// caller cleanup proves that this current-SP store is outgoing argument
 			// storage; consume its SSA value directly just like a recovered push.
-			if (_config->getConfig().architecture.isX86()
+			if (!isDecodedX86Push && !isUnresolvedX86Push
+					&& _config->getConfig().architecture.isX86()
 					&& cleanupBytes != 0 && val->getType()->isSized())
 			{
 				auto* address = llvm_utils::skipCasts(ptr);
@@ -1308,6 +1370,24 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 								spLoad->getPointerOperand())
 						&& _module->getDataLayout().getTypeStoreSize(
 								val->getType()) <= cleanupBytes;
+			}
+
+			// Process reservation PUSHes before the usual duplicate-destination
+			// filtering.  StackAnalysis commonly maps the last PUSH and the
+			// overwriting FSTP to the same alloca, which intentionally disqualifies
+			// the PUSH as an argument but must still consume its reservation bytes.
+			if (overwrittenReservationBytes != 0 && isDecodedX86Push
+					&& !AsmInstruction::isLlvmToAsmInstruction(store)
+					&& !_config->isStackPointerRegister(ptr)
+					&& (isUnresolvedX86Push || _config->isStackVariable(ptr)))
+			{
+				if (x86SlotSize > overwrittenReservationBytes)
+				{
+					break;
+				}
+				overwrittenReservationBytes -= x86SlotSize;
+				overwrittenReservationAsm = asmInstruction;
+				continue;
 			}
 
 			if (!isUnresolvedX86Push && !isUnresolvedX86StackBlock
@@ -1343,7 +1423,8 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 				bool isStackArgument = _config->isStackVariable(ptr)
 						|| isUnresolvedX86Push || isUnresolvedX86StackBlock;
 				bool hasDecodedStackEffect = isDecodedX86Push
-						|| isUnresolvedX86Push || isUnresolvedX86StackBlock;
+						|| isUnresolvedX86Push || isUnresolvedX86StackBlock
+						|| isDecodedX86WideStackStore;
 				if (isStackArgument && hasDecodedStackEffect && x86SlotSize != 0)
 				{
 					uint64_t valueBytes = val->getType()->isSized()
@@ -1355,6 +1436,25 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 									x86SlotSize,
 									((valueBytes + x86SlotSize - 1) / x86SlotSize)
 											* x86SlotSize);
+				}
+
+				// A common x87 cdecl sequence reserves a QWORD with two dummy
+				// PUSHes and then overwrites both slots with FSTP QWORD [ESP].  The
+				// wide current-SP store is the argument; the earlier PUSH stores are
+				// only reservation mechanics and must not become phantom scalar args.
+				// Walking backwards encounters the wide store first, so remember how
+				// many immediately preceding decoded push bytes it covers.
+				if ((isUnresolvedX86StackBlock
+						|| isDecodedX86WideStackStore) && stackBytes != 0)
+				{
+					overwrittenReservationBytes += stackBytes;
+					overwrittenReservationAsm = asmInstruction;
+				}
+				else if (overwrittenReservationBytes != 0
+						&& isStackArgument && !hasDecodedStackEffect)
+				{
+					overwrittenReservationBytes = 0;
+					overwrittenReservationAsm = AsmInstruction();
 				}
 
 				if (nestedCleanupBytes != 0)
@@ -1402,29 +1502,45 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 		}
 	}
 
-	// A caller-side ESP adjustment gives an exact upper bound on the number of
-	// x86 stack arguments.  Without this bound, a store of the preceding call's
-	// result into an ordinary stack local can be mistaken for one more argument
-	// after unresolved push stores have been recovered.
+	// A caller-side ESP adjustment gives an exact upper bound on the byte width
+	// of x86 stack arguments.  Count the actual rounded store widths rather than
+	// one slot per store: a QWORD x87 argument occupies two i386 slots.  Without
+	// this bound, a store into an ordinary stack local can be mistaken for one
+	// more argument after the real outgoing block has already filled the cleanup.
 	if (_config->getConfig().architecture.isX86())
 	{
 		unsigned slotSize = _config->getConfig().architecture.getByteSize();
 		if (cleanupBytes != 0 && slotSize != 0)
 		{
-			unsigned maximumStackArgs = cleanupBytes / slotSize;
-			unsigned stackArgs = 0;
+			uint64_t stackBytes = 0;
 			auto it = ce.possibleArgStores.begin();
 			while (it != ce.possibleArgStores.end())
 			{
 				auto* store = *it;
-				if (ce.isStackArgumentStore(_config, store)
-						&& ++stackArgs > maximumStackArgs)
+				uint64_t candidateBytes = 0;
+				if (ce.isStackArgumentStore(_config, store))
+				{
+					auto instruction = AsmInstruction(store);
+					auto* capstone = instruction.isValid()
+							? instruction.getCapstoneInsn() : nullptr;
+					uint64_t valueBytes = capstone != nullptr
+								&& capstone->id == X86_INS_PUSH
+							? slotSize
+							: _module->getDataLayout().getTypeStoreSize(
+									store->getValueOperand()->getType());
+					candidateBytes = std::max<uint64_t>(
+							slotSize,
+							((valueBytes + slotSize - 1) / slotSize) * slotSize);
+				}
+				if (candidateBytes != 0
+						&& stackBytes + candidateBytes > cleanupBytes)
 				{
 					ce.unresolvedStackArgStores.erase(store);
 					it = ce.possibleArgStores.erase(it);
 				}
 				else
 				{
+					stackBytes += candidateBytes;
 					++it;
 				}
 			}

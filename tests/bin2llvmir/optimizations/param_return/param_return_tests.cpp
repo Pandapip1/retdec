@@ -65,7 +65,6 @@ TEST_F(ParamReturnTests, x86PtrCallBasicFunctionality)
 		]
 	})");
 	auto abi = AbiProvider::addAbi(module.get(), &config);
-
 	pass.runOnModuleCustom(*module, &config, abi);
 
 	std::string exp = R"(
@@ -453,6 +452,110 @@ TEST_F(ParamReturnTests, x86ExternalCallUnresolvedUnaryPushIsNotDropped)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86DecodedPushSurvivesWithoutPairedEspUpdate)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define void @fnc() {
+			%dummy_local = alloca i32
+			store i32 0, i32* %dummy_local
+			%sp = load i32, i32* @esp
+			%new_sp = sub i32 %sp, 4
+			%slot = inttoptr i32 %new_sp to i32*
+			store volatile i64 100, i64* @llvm2asm
+			store i32 123, i32* %slot
+			store volatile i64 150, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 200, i64* @llvm2asm
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 4
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "fnc",
+				"locals" : [
+					{
+						"name" : "dummy_local",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+	cs_insn pushInstruction = {};
+	pushInstruction.id = X86_INS_PUSH;
+	pushInstruction.size = 1;
+	auto pushAsm = AsmInstruction(module.get(), 100);
+	ASSERT_TRUE(pushAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			pushAsm.getLlvmToAsmInstruction()] = &pushInstruction;
+	cs_insn callInstruction = {};
+	callInstruction.id = X86_INS_CALL;
+	callInstruction.size = 1;
+	auto callAsm = AsmInstruction(module.get(), 150);
+	ASSERT_TRUE(callAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			callAsm.getLlvmToAsmInstruction()] = &callInstruction;
+	cs_insn cleanupInstruction = {};
+	cs_detail cleanupDetail = {};
+	cleanupInstruction.id = X86_INS_ADD;
+	cleanupInstruction.size = 2;
+	cleanupInstruction.detail = &cleanupDetail;
+	cleanupDetail.x86.op_count = 2;
+	cleanupDetail.x86.operands[0].type = X86_OP_REG;
+	cleanupDetail.x86.operands[0].reg = X86_REG_ESP;
+	cleanupDetail.x86.operands[1].type = X86_OP_IMM;
+	cleanupDetail.x86.operands[1].imm = 4;
+	auto cleanupAsm = AsmInstruction(module.get(), 200);
+	ASSERT_TRUE(cleanupAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			cleanupAsm.getLlvmToAsmInstruction()] = &cleanupInstruction;
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(1u, consume->arg_size());
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("fnc"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(1u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(123));
+}
+
 TEST_F(ParamReturnTests, x86RepeatedImmediatePushesIgnoreUnrelatedByteLocal)
 {
 	parseInput(R"(
@@ -689,6 +792,311 @@ TEST_F(ParamReturnTests, x86RecoversDoubleStoredIntoReservedOutgoingStackBlock)
 	EXPECT_EQ(0u, dynamicStores);
 }
 
+TEST_F(ParamReturnTests, x86WideStackStoreConsumesDummyPushReservations)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare i32 @consume()
+		define void @caller(double %input) {
+			%sp0 = load i32, i32* @esp
+			%reserve_sp1 = sub i32 %sp0, 4
+			%reserve_slot1 = inttoptr i32 %reserve_sp1 to i32*
+			store i32 0, i32* %reserve_slot1
+			store i32 %reserve_sp1, i32* @esp
+			%reserve_sp2 = sub i32 %reserve_sp1, 4
+			%reserve_slot2 = inttoptr i32 %reserve_sp2 to i32*
+			store i32 0, i32* %reserve_slot2
+			store i32 %reserve_sp2, i32* @esp
+			%current_sp = load i32, i32* @esp
+			%double_slot = inttoptr i32 %current_sp to double*
+			store double %input, double* %double_slot
+			%sp3 = load i32, i32* @esp
+			%arg_sp = sub i32 %sp3, 4
+			%arg_slot = inttoptr i32 %arg_sp to i32*
+			store i32 7, i32* %arg_slot
+			store i32 %arg_sp, i32* @esp
+			call i32 @consume()
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 12
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_TRUE((argument++)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(argument->getType()->isDoubleTy());
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(0))->equalsInt(7));
+	EXPECT_EQ(&*module->getFunction("caller")->arg_begin(),
+			recoveredCall->getArgOperand(1));
+}
+
+TEST_F(ParamReturnTests, x86DecodedReservationsCanPrecedeFldzProducer)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define void @caller(double %input) {
+			store volatile i64 100, i64* @llvm2asm
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 0, i32* %slot1
+			store i32 %sp1, i32* @esp
+			store volatile i64 101, i64* @llvm2asm
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 0, i32* %slot2
+			store i32 %sp2, i32* @esp
+			store volatile i64 102, i64* @llvm2asm
+			%zero = fsub double %input, %input
+			store volatile i64 104, i64* @llvm2asm
+			%current_sp = load i32, i32* @esp
+			%double_slot = inttoptr i32 %current_sp to double*
+			store double %zero, double* %double_slot
+			store volatile i64 107, i64* @llvm2asm
+			%sp3 = load i32, i32* @esp
+			%sp4 = sub i32 %sp3, 4
+			%slot4 = inttoptr i32 %sp4 to i32*
+			store i32 7, i32* %slot4
+			store i32 %sp4, i32* @esp
+			store volatile i64 150, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 200, i64* @llvm2asm
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 12
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+
+	cs_insn pushInstruction = {};
+	pushInstruction.id = X86_INS_PUSH;
+	pushInstruction.size = 1;
+	cs_insn fldzInstruction = {};
+	fldzInstruction.id = X86_INS_FLDZ;
+	fldzInstruction.size = 2;
+	cs_insn fstpInstruction = {};
+	fstpInstruction.id = X86_INS_FSTP;
+	fstpInstruction.size = 3;
+	cs_insn callInstruction = {};
+	callInstruction.id = X86_INS_CALL;
+	callInstruction.size = 5;
+	for (auto pair : std::vector<std::pair<uint64_t, cs_insn*>>{
+			{100, &pushInstruction},
+			{101, &pushInstruction},
+			{102, &fldzInstruction},
+			{104, &fstpInstruction},
+			{107, &pushInstruction},
+			{150, &callInstruction}})
+	{
+		auto instruction = AsmInstruction(module.get(), pair.first);
+		ASSERT_TRUE(instruction.isValid());
+		AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+				instruction.getLlvmToAsmInstruction()] = pair.second;
+	}
+	cs_insn cleanupInstruction = {};
+	cs_detail cleanupDetail = {};
+	cleanupInstruction.id = X86_INS_ADD;
+	cleanupInstruction.size = 3;
+	cleanupInstruction.detail = &cleanupDetail;
+	cleanupDetail.x86.op_count = 2;
+	cleanupDetail.x86.operands[0].type = X86_OP_REG;
+	cleanupDetail.x86.operands[0].reg = X86_REG_ESP;
+	cleanupDetail.x86.operands[1].type = X86_OP_IMM;
+	cleanupDetail.x86.operands[1].imm = 12;
+	auto cleanupAsm = AsmInstruction(module.get(), 200);
+	ASSERT_TRUE(cleanupAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			cleanupAsm.getLlvmToAsmInstruction()] = &cleanupInstruction;
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_TRUE((argument++)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(argument->getType()->isDoubleTy());
+}
+
+TEST_F(ParamReturnTests, x86WideStackStoreDoesNotConsumeNonAdjacentPush)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define void @caller(double %input) {
+			%dummy_local = alloca i32
+			store i32 0, i32* %dummy_local
+			store volatile i64 100, i64* @llvm2asm
+			%sp0 = load i32, i32* @esp
+			%push_sp = sub i32 %sp0, 4
+			%push_slot = inttoptr i32 %push_sp to i32*
+			store i32 99, i32* %push_slot
+			store i32 %push_sp, i32* @esp
+			store volatile i64 110, i64* @llvm2asm
+			%unrelated = add i32 1, 2
+			store volatile i64 120, i64* @llvm2asm
+			%current_sp = load i32, i32* @esp
+			%double_slot = inttoptr i32 %current_sp to double*
+			store double %input, double* %double_slot
+			store volatile i64 150, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 200, i64* @llvm2asm
+			%cleanup = load i32, i32* @esp
+			%restored = add i32 %cleanup, 12
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "caller",
+				"locals" : [
+					{
+						"name" : "dummy_local",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+
+	cs_insn pushInstruction = {};
+	pushInstruction.id = X86_INS_PUSH;
+	pushInstruction.size = 1;
+	cs_insn unrelatedInstruction = {};
+	unrelatedInstruction.id = X86_INS_NOP;
+	unrelatedInstruction.size = 1;
+	cs_insn wideStoreInstruction = {};
+	wideStoreInstruction.id = X86_INS_FSTP;
+	wideStoreInstruction.size = 1;
+	cs_insn callInstruction = {};
+	callInstruction.id = X86_INS_CALL;
+	callInstruction.size = 1;
+	for (auto pair : std::vector<std::pair<uint64_t, cs_insn*>>{
+			{100, &pushInstruction},
+			{110, &unrelatedInstruction},
+			{120, &wideStoreInstruction},
+			{150, &callInstruction}})
+	{
+		auto instruction = AsmInstruction(module.get(), pair.first);
+		ASSERT_TRUE(instruction.isValid());
+		AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+				instruction.getLlvmToAsmInstruction()] = pair.second;
+	}
+	cs_insn cleanupInstruction = {};
+	cs_detail cleanupDetail = {};
+	cleanupInstruction.id = X86_INS_ADD;
+	cleanupInstruction.size = 2;
+	cleanupInstruction.detail = &cleanupDetail;
+	cleanupDetail.x86.op_count = 2;
+	cleanupDetail.x86.operands[0].type = X86_OP_REG;
+	cleanupDetail.x86.operands[0].reg = X86_REG_ESP;
+	cleanupDetail.x86.operands[1].type = X86_OP_IMM;
+	cleanupDetail.x86.operands[1].imm = 12;
+	auto cleanupAsm = AsmInstruction(module.get(), 200);
+	ASSERT_TRUE(cleanupAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			cleanupAsm.getLlvmToAsmInstruction()] = &cleanupInstruction;
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_TRUE((argument++)->getType()->isDoubleTy());
+	EXPECT_TRUE(argument->getType()->isIntegerTy(32));
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_EQ(&*module->getFunction("caller")->arg_begin(),
+			recoveredCall->getArgOperand(0));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->equalsInt(99));
+}
+
 TEST_F(ParamReturnTests, x86FloatingStoreOverwritesReservedPushSlot)
 {
 	parseInput(R"(
@@ -774,6 +1182,114 @@ TEST_F(ParamReturnTests, x86FloatingStoreOverwritesReservedPushSlot)
 	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
 	EXPECT_TRUE(recoveredCall->getArgOperand(0)->getType()->isDoubleTy());
 	EXPECT_TRUE(recoveredCall->getArgOperand(1)->getType()->isIntegerTy(32));
+}
+
+TEST_F(ParamReturnTests, x86CleanupBoundCountsWideStackArgumentBytes)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define void @caller(i32 %kind, double %input) {
+			%out_i32 = alloca i32
+			%out_double = alloca double
+			%stale_local = alloca double
+			store double 4.200000e+01, double* %stale_local
+			store double %input, double* %out_double
+			store i32 %kind, i32* %out_i32
+			store volatile i64 150, i64* @llvm2asm
+			call i32 @consume()
+			store volatile i64 200, i64* @llvm2asm
+			%sp = load i32, i32* @esp
+			%restored = add i32 %sp, 12
+			store i32 %restored, i32* @esp
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"functions" : [
+			{
+				"name" : "caller",
+				"locals" : [
+					{
+						"name" : "out_i32",
+						"storage" : { "type" : "stack", "value" : -16 }
+					},
+					{
+						"name" : "out_double",
+						"storage" : { "type" : "stack", "value" : -12 }
+					},
+					{
+						"name" : "stale_local",
+						"storage" : { "type" : "stack", "value" : -4 }
+					}
+				]
+			}
+		],
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	auto* fileImage = FileImageProvider::addFileImage(
+			module.get(), createFormat(), &config);
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, fileImage->getImage());
+	auto* mapGlobal = getGlobalByName("llvm2asm");
+	AsmInstruction::setLlvmToAsmGlobalVariable(module.get(), mapGlobal);
+
+	cs_insn callInstruction = {};
+	callInstruction.id = X86_INS_CALL;
+	callInstruction.size = 1;
+	auto callAsm = AsmInstruction(module.get(), 150);
+	ASSERT_TRUE(callAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			callAsm.getLlvmToAsmInstruction()] = &callInstruction;
+	cs_insn cleanupInstruction = {};
+	cs_detail cleanupDetail = {};
+	cleanupInstruction.id = X86_INS_ADD;
+	cleanupInstruction.size = 2;
+	cleanupInstruction.detail = &cleanupDetail;
+	cleanupDetail.x86.op_count = 2;
+	cleanupDetail.x86.operands[0].type = X86_OP_REG;
+	cleanupDetail.x86.operands[0].reg = X86_REG_ESP;
+	cleanupDetail.x86.operands[1].type = X86_OP_IMM;
+	cleanupDetail.x86.operands[1].imm = 12;
+	auto cleanupAsm = AsmInstruction(module.get(), 200);
+	ASSERT_TRUE(cleanupAsm.isValid());
+	AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[
+			cleanupAsm.getLlvmToAsmInstruction()] = &cleanupInstruction;
+
+	pass.runOnModuleCustom(*module, &config, abi, fileImage, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(2u, consume->arg_size());
+	auto argument = consume->arg_begin();
+	EXPECT_TRUE((argument++)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(argument->getType()->isDoubleTy());
+	CallInst* recoveredCall = nullptr;
+	for (BasicBlock& block : *module->getFunction("caller"))
+	for (Instruction& instruction : block)
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() == consume)
+		{
+			recoveredCall = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(2u, recoveredCall->getNumArgOperands());
+	EXPECT_TRUE(recoveredCall->getArgOperand(0)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(recoveredCall->getArgOperand(1)->getType()->isDoubleTy());
 }
 
 TEST_F(ParamReturnTests, x86FunctionTypeUsesMostCompleteCallSite)
