@@ -4,6 +4,7 @@
 * @copyright (c) 2020 Avast Software, licensed under the MIT license
 */
 
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
@@ -699,6 +700,34 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 				callLoad->replaceAllUsesWith(conv);
 				callLoad->eraseFromParent();
 			}
+		}
+	}
+
+	// A failed static TOP analysis must not leave frontend-only pseudo calls in
+	// backend IR.  Their index operand already denotes the architectural TOP,
+	// so the runtime-indexed lowering is a semantics-preserving fallback for
+	// irreducible or otherwise ambiguous control flow.
+	SmallVector<CallInst*, 32> remainingPseudoCalls;
+	for (Function& f : *_module)
+	{
+		for (Instruction& i : instructions(f))
+		{
+			if (_config->isLlvmX87StorePseudoFunctionCall(&i)
+					|| _config->isLlvmX87LoadPseudoFunctionCall(&i))
+			{
+				remainingPseudoCalls.push_back(cast<CallInst>(&i));
+			}
+		}
+	}
+	for (CallInst* call : remainingPseudoCalls)
+	{
+		if (_config->isLlvmX87StorePseudoFunctionCall(call))
+		{
+			lowerRuntimeStore(call, uint32_t(X86_REG_ST0));
+		}
+		else
+		{
+			lowerRuntimeLoad(call, uint32_t(X86_REG_ST0));
 		}
 	}
 	return analyzeSucces;

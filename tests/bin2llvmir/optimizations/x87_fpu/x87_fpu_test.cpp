@@ -1715,6 +1715,36 @@ TEST_F(X87FpuAnalysisTests, if_else_branch_fail)
 	bool b = pass.runOnModuleCustom(*module, config, abi);
 
 	EXPECT_FALSE(b);
+	unsigned pseudoCalls = 0;
+	unsigned stackRegisterLoads = 0;
+	unsigned stackRegisterStores = 0;
+	std::set<Value*> stackRegisters;
+	for (unsigned n = 0; n < 8; ++n)
+	{
+		stackRegisters.insert(getGlobalByName("st" + std::to_string(n)));
+	}
+	for (auto& instruction : instructions(getFunctionByName("foo")))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataStorePseudoFunction();
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataLoadPseudoFunction();
+		}
+		else if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			stackRegisterLoads += stackRegisters.count(load->getPointerOperand());
+		}
+		else if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			stackRegisterStores += stackRegisters.count(store->getPointerOperand());
+		}
+	}
+	EXPECT_EQ(0u, pseudoCalls);
+	EXPECT_EQ(8u, stackRegisterLoads);
+	EXPECT_EQ(8u, stackRegisterStores);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 } // if_else_branch_fail
 
 TEST_F(X87FpuAnalysisTests, usesRuntimeTopForValueLoadedAfterCall)
