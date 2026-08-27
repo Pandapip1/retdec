@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <set>
 #include <vector>
 
 #include <llvm/Analysis/ValueTracking.h>
@@ -435,6 +436,33 @@ uint32_t configuredFunctionExtent(Config* config, Function* function)
 			uint64_t{UINT32_MAX}));
 }
 
+bool constantIsGuestAddress(Constant* constant, uint32_t address)
+{
+	auto* expression = dyn_cast<ConstantExpr>(constant);
+	if (expression == nullptr)
+	{
+		return false;
+	}
+	if (expression->getOpcode() == Instruction::IntToPtr)
+	{
+		if (auto* value = dyn_cast<ConstantInt>(expression->getOperand(0)))
+		{
+			return value->getZExtValue() == address;
+		}
+	}
+	for (Value* operand : expression->operands())
+	{
+		if (auto* child = dyn_cast<Constant>(operand))
+		{
+			if (constantIsGuestAddress(child, address))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 } // anonymous namespace
 
 bool Pe32PointerBridge::run()
@@ -449,6 +477,17 @@ bool Pe32PointerBridge::run()
 
 	auto& context = _module->getContext();
 	auto* int32 = Type::getInt32Ty(context);
+	// Record this before generating the constructor: passing a function to the
+	// registration runtime is itself address-taking and must not make every
+	// decoded direct-call-only function look like a required indirect target.
+	std::set<Function*> functionsNeedingMappings;
+	for (Function& function : *_module)
+	{
+		if (!function.isDeclaration() && function.hasAddressTaken())
+		{
+			functionsNeedingMappings.insert(&function);
+		}
+	}
 	bool changed = materializePointerConstantExpressions(_module);
 	std::vector<PointerCellInitializer> pointerInitializers;
 	for (GlobalVariable& global : _module->globals())
@@ -519,6 +558,38 @@ bool Pe32PointerBridge::run()
 			}
 		}
 	}
+	// A decoded indirect target may be represented only by its original PE32
+	// integer address.  Preserve exact configured targets used by inttoptr,
+	// even when there is consequently no symbolic LLVM use of the function.
+	for (Function& function : *_module)
+	{
+		if (function.isDeclaration())
+		{
+			continue;
+		}
+		const uint32_t address = configuredGuestAddress(_config, &function);
+		if (address == 0)
+		{
+			continue;
+		}
+		for (IntToPtrInst* dereference : guestDereferences)
+		{
+			auto* value = dyn_cast<ConstantInt>(dereference->getOperand(0));
+			if (value != nullptr && value->getZExtValue() == address)
+			{
+				functionsNeedingMappings.insert(&function);
+				break;
+			}
+		}
+		for (const auto& initializer : pointerInitializers)
+		{
+			if (constantIsGuestAddress(initializer.value, address))
+			{
+				functionsNeedingMappings.insert(&function);
+				break;
+			}
+		}
+	}
 	bool hasConfiguredMappings = false;
 	for (GlobalVariable& global : _module->globals())
 	{
@@ -529,7 +600,7 @@ bool Pe32PointerBridge::run()
 	for (Function& function : *_module)
 	{
 		hasConfiguredMappings = hasConfiguredMappings
-				|| (!function.isDeclaration()
+				|| (functionsNeedingMappings.count(&function) != 0
 						&& configuredGuestAddress(_config, &function) != 0);
 	}
 	if (hostEscapes.empty()
@@ -599,7 +670,9 @@ bool Pe32PointerBridge::run()
 	}
 	for (Function& function : *_module)
 	{
-		if (function.isDeclaration() || &function == initializer)
+		if (function.isDeclaration()
+				|| &function == initializer
+				|| functionsNeedingMappings.count(&function) == 0)
 		{
 			continue;
 		}

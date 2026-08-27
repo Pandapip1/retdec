@@ -5,7 +5,9 @@
  */
 
 #include <llvm/IR/InstIterator.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Transforms/IPO.h>
 
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
@@ -359,10 +361,74 @@ TEST_F(Pe32PointerLegalizationTests,
 		}
 	}
 	EXPECT_EQ(2u, objectRegistrations);
-	EXPECT_EQ(1u, functionRegistrations);
+	EXPECT_EQ(0u, functionRegistrations);
 	EXPECT_EQ(1u, encodedInitializers);
 	EXPECT_EQ(1u, fourBytePointerStores);
 	EXPECT_NE(nullptr, module->getGlobalVariable("llvm.global_ctors"));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeRegistersOnlyAddressTakenFunctionsAndAllowsGlobalDce)
+{
+	parseInput(R"(
+		@address.taken = global void ()* @kept
+		define internal void @kept() {
+			ret void
+		}
+		define internal void @unused() {
+			ret void
+		}
+		define internal void @direct() {
+			ret void
+		}
+		define internal void @raw.target() {
+			ret void
+		}
+		define void @caller() {
+			call void @direct()
+			call void inttoptr (i32 4214784 to void ()*)()
+			ret void
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addFunctionRange(config, "kept", 0x401000, 0x401010);
+	addFunctionRange(config, "unused", 0x402000, 0x402010);
+	addFunctionRange(config, "direct", 0x403000, 0x403010);
+	addFunctionRange(config, "caller", 0x404000, 0x404010);
+	addFunctionRange(config, "raw.target", 0x405000, 0x405010);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* initializer = module->getFunction(
+			"__retdec_pe32_initialize_mappings");
+	ASSERT_NE(nullptr, initializer);
+	std::set<std::string> registeredFunctions;
+	for (Instruction& instruction : instructions(initializer))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr
+				|| call->getCalledFunction() == nullptr
+				|| call->getCalledFunction()->getName()
+						!= "retdec_pe32_register_host_function")
+		{
+			continue;
+		}
+		Value* target = call->getArgOperand(0)->stripPointerCasts();
+		if (auto* function = dyn_cast<Function>(target))
+		{
+			registeredFunctions.insert(function->getName().str());
+		}
+	}
+	EXPECT_EQ(std::set<std::string>({"kept", "raw.target"}),
+			registeredFunctions);
+
+	legacy::PassManager dce;
+	dce.add(createGlobalDCEPass());
+	dce.run(*module);
+	EXPECT_EQ(nullptr, module->getFunction("unused"));
+	EXPECT_NE(nullptr, module->getFunction("direct"));
+	EXPECT_NE(nullptr, module->getFunction("kept"));
+	EXPECT_NE(nullptr, module->getFunction("raw.target"));
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
