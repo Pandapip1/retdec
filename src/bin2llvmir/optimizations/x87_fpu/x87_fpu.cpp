@@ -65,6 +65,7 @@ class FunctionAnalyzeMetadata
 		// 1. index to register, 2.pseudo instruction
 		std::list<std::pair<uint32_t ,llvm::Instruction*>> pseudoCalls;
 		std::map<llvm::Value*, int> topVals;
+		std::map<llvm::CallInst*, int> callTopVals;
 
 		int expectedTop = 0;
 		bool expectedTopAnalyzed = false;
@@ -205,6 +206,7 @@ bool X87FpuAnalysis::checkArchAndCallConvException(llvm::Function* fun)
 
 bool X87FpuAnalysis::run()
 {
+	_runtimeEntryStackFunctions.clear();
 	if (_config == nullptr || _abi == nullptr)
 	{
 		return ANALYZE_FAIL;
@@ -330,6 +332,11 @@ bool X87FpuAnalysis::analyzeInstruction(
 					|| !callFunction->getCalledFunction()->isIntrinsic()))
 	{
 		auto* calledFunction = callFunction->getCalledFunction();
+		// A callee entered while this function has a live x87 stack cannot use
+		// the analysis's conventional empty-entry TOP to select a fixed ST
+		// global. Remember it so its pseudo stack accesses are lowered through
+		// the architectural runtime TOP instead.
+		funMd.callTopVals[callFunction] = outTop;
 		auto it = calledFunction
 				? getFunMd(analyzedFunctionsMetadata, calledFunction)
 				: analyzedFunctionsMetadata.end();
@@ -480,6 +487,11 @@ bool X87FpuAnalysis::isValidRegisterIndex(int index)
 
 bool X87FpuAnalysis::requiresRuntimeStackIndex(llvm::CallInst* call) const
 {
+	if (_runtimeEntryStackFunctions.count(call->getFunction()) != 0)
+	{
+		return true;
+	}
+
 	Value* index = call->getArgOperand(0);
 	Instruction* indexInstruction = dyn_cast<Instruction>(index);
 
@@ -599,6 +611,35 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 		std::list<FunctionAnalyzeMetadata>& analyzedFunctionsMetadata)
 {
 	bool analyzeSucces = true;
+
+	// Resolve each call site's relative TOP against its basic-block entry
+	// solution before rewriting pseudo stack accesses. A callee entered with a
+	// live x87 value must address ST(i) using the architectural runtime TOP;
+	// assuming the conventional empty function entry can otherwise make caller
+	// and callee select different physical ST globals.
+	for (auto& funMd : analyzedFunctionsMetadata)
+	{
+		if (!funMd.analyzeSuccess)
+		{
+			continue;
+		}
+		for (const auto& callTop : funMd.callTopVals)
+		{
+			auto* calledFunction = callTop.first->getCalledFunction();
+			if (calledFunction == nullptr)
+			{
+				continue;
+			}
+			double bbIn = funMd.x(
+					funMd.indexes[callTop.first->getParent()][funMd.inIndex], 0);
+			int actualTop = static_cast<int>(round(bbIn)) + callTop.second;
+			if (actualTop != EMPTY_FPU_STACK)
+			{
+				_runtimeEntryStackFunctions.insert(calledFunction);
+			}
+		}
+	}
+
 	for (auto& funMd : analyzedFunctionsMetadata)
 	{
 		if (!funMd.analyzeSuccess)
@@ -653,7 +694,6 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 			}
 		}
 	}
-
 	return analyzeSucces;
 }
 

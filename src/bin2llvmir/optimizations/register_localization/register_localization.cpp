@@ -5,6 +5,7 @@
 */
 
 #include <cassert>
+#include <set>
 
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
@@ -69,6 +70,34 @@ bool RegisterLocalization::run()
 
 	for (GlobalVariable* reg : regs)
 	{
+		// A register referenced by multiple lifted functions is shared
+		// architectural state. Localizing it independently in each function
+		// disconnects a caller's last value from a callee's entry value (most
+		// visibly for the x87 TOP/ST registers). Keep such registers global until
+		// the pass can model call-boundary flush/reload semantics explicitly.
+		std::set<Function*> usingFunctions;
+		for (auto* user : reg->users())
+		{
+			if (auto* instruction = dyn_cast<Instruction>(user))
+			{
+				usingFunctions.insert(instruction->getFunction());
+			}
+			else if (auto* expression = dyn_cast<ConstantExpr>(user))
+			{
+				for (auto* expressionUser : expression->users())
+				{
+					if (auto* instruction = dyn_cast<Instruction>(expressionUser))
+					{
+						usingFunctions.insert(instruction->getFunction());
+					}
+				}
+			}
+		}
+		if (usingFunctions.size() > 1)
+		{
+			continue;
+		}
+
 		std::map<Function*, AllocaInst*> fnc2alloca;
 
 		for (auto uIt = reg->user_begin(); uIt != reg->user_end(); )

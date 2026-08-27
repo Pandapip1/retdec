@@ -20,6 +20,35 @@ namespace retdec {
 namespace bin2llvmir {
 namespace inst_opt_rda {
 
+static bool hasInstructionUserOutsideFunction(
+		llvm::GlobalVariable* global,
+		llvm::Function* function)
+{
+	for (auto* user : global->users())
+	{
+		if (auto* instruction = llvm::dyn_cast<llvm::Instruction>(user))
+		{
+			if (instruction->getFunction() != function)
+			{
+				return true;
+			}
+		}
+		else if (auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(user))
+		{
+			for (auto* expressionUser : expression->users())
+			{
+				auto* instruction = llvm::dyn_cast<llvm::Instruction>(expressionUser);
+				if (instruction != nullptr
+						&& instruction->getFunction() != function)
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 /**
  * store i1 %a, i1* <reg/local>
  * ...
@@ -146,6 +175,11 @@ bool defWithUsesInTheSameBb(
 
 	bool ret = false;
 	bool allUsesRemoved = true;
+	auto* global = llvm::dyn_cast<llvm::GlobalVariable>(
+			store->getPointerOperand());
+	bool hasCrossFunctionUse = global != nullptr
+			&& abi->isRegister(global)
+			&& hasInstructionUserOutsideFunction(global, store->getFunction());
 	for (auto* use : def->uses)
 	{
 		if (use->use
@@ -170,7 +204,7 @@ bool defWithUsesInTheSameBb(
 		}
 	}
 
-	if (allUsesRemoved)
+	if (allUsesRemoved && !hasCrossFunctionUse)
 	{
 		if (toRemove)
 		{

@@ -1771,6 +1771,57 @@ TEST_F(X87FpuAnalysisTests, usesRuntimeTopForValueLoadedAfterCall)
 	EXPECT_EQ(topAfter, condition->getOperand(0));
 }
 
+TEST_F(X87FpuAnalysisTests, usesRuntimeTopForCalleeEnteredWithLiveStack)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define i32 @foo(x86_fp80 %value) {
+		entry:
+			%top.before = load i3, i3* @fpu_stat_TOP
+			%pushed = sub i3 %top.before, 1
+			store i3 %pushed, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed, x86_fp80 %value)
+			%result = call i32 @boo()
+			ret i32 %result
+		}
+		define i32 @boo() {
+		entry:
+			%top.entry = load i3, i3* @fpu_stat_TOP
+			%value = call x86_fp80 @__frontend_reg_load.fpr(i3 %top.entry)
+			%result = fptosi x86_fp80 %value to i32
+			ret i32 %result
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	std::set<Value*> stackRegisters;
+	for (unsigned n = 0; n < 8; ++n)
+	{
+		stackRegisters.insert(getGlobalByName("st" + std::to_string(n)));
+	}
+
+	auto* callee = getFunctionByName("boo");
+	unsigned runtimeStackLoads = 0;
+	unsigned pseudoCalls = 0;
+	for (auto& instruction : instructions(callee))
+	{
+		if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			runtimeStackLoads += stackRegisters.count(load->getPointerOperand());
+		}
+		else if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			pseudoCalls += call->getCalledFunction()
+					== config->getLlvmX87DataLoadPseudoFunction();
+		}
+	}
+
+	EXPECT_EQ(8u, runtimeStackLoads);
+	EXPECT_EQ(0u, pseudoCalls);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(X87FpuAnalysisTests, handlesIndirectCallBeforeX87Load)
 {
 	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(

@@ -53,6 +53,38 @@ TEST_F(RegisterLocalizationTests, preservesIncomingArchitecturalRegisterValue)
 	EXPECT_EQ(localized, originalLoad->getPointerOperand());
 }
 
+TEST_F(RegisterLocalizationTests, preservesArchitecturalRegisterSharedAcrossCall)
+{
+	parseInput(R"(
+		@st7 = internal global x86_fp80 0xK00000000000000000000
+		define i32 @caller() {
+		entry:
+			store x86_fp80 0xK4002B2D20000000000000, x86_fp80* @st7
+			%result = call i32 @callee()
+			ret i32 %result
+		}
+		define i32 @callee() {
+		entry:
+			%value = load x86_fp80, x86_fp80* @st7
+			%result = fptosi x86_fp80 %value to i32
+			ret i32 %result
+		}
+	)");
+	auto config = Config::empty(module.get());
+	AbiX86 abi(module.get(), &config);
+	auto* architectural = getGlobalByName("st7");
+	abi.addRegister(X86_REG_ST7, architectural);
+
+	EXPECT_FALSE(pass.runOnModuleCustom(*module, &abi, &config));
+
+	auto* sharedStore = getNthInstruction<StoreInst>();
+	ASSERT_NE(nullptr, sharedStore);
+	EXPECT_EQ(architectural, sharedStore->getPointerOperand());
+	auto* sharedLoad = getNthInstruction<LoadInst>();
+	ASSERT_NE(nullptr, sharedLoad);
+	EXPECT_EQ(architectural, sharedLoad->getPointerOperand());
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
