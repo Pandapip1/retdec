@@ -13,6 +13,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
 
@@ -236,9 +237,202 @@ NativeObjectExtent getNativeObjectExtent(Module* module, Value* pointer)
 Value* pointerAsBytePointer(IRBuilder<>& builder, Value* pointer)
 {
 	auto* bytePointer = Type::getInt8PtrTy(pointer->getContext());
-	return pointer->getType() == bytePointer
-			? pointer
-			: builder.CreateBitCast(pointer, bytePointer);
+	if (pointer->getType() == bytePointer)
+	{
+		return pointer;
+	}
+	auto* pointerType = cast<PointerType>(pointer->getType());
+	return pointerType->getAddressSpace() == 0
+			? builder.Insert(new BitCastInst(pointer, bytePointer))
+			: builder.CreateAddrSpaceCast(pointer, bytePointer);
+}
+
+bool constantNeedsPointerBridge(Constant* constant)
+{
+	auto* expression = dyn_cast<ConstantExpr>(constant);
+	if (expression == nullptr)
+	{
+		return false;
+	}
+	if (expression->getOpcode() == Instruction::PtrToInt
+			&& expression->getType()->isIntegerTy(32)
+			&& expression->getOperand(0)->getType()->getPointerAddressSpace() == 0)
+	{
+		return true;
+	}
+	if (expression->getOpcode() == Instruction::IntToPtr
+			&& expression->getOperand(0)->getType()->isIntegerTy(32)
+			&& expression->getType()->getPointerAddressSpace() == 0)
+	{
+		return true;
+	}
+	for (Value* operand : expression->operands())
+	{
+		if (auto* child = dyn_cast<Constant>(operand))
+		{
+			if (constantNeedsPointerBridge(child))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+Instruction* materializePointerConstantExpression(
+		ConstantExpr* expression,
+		Instruction* before)
+{
+	auto* materialized = expression->getAsInstruction();
+	materialized->insertBefore(before);
+	for (unsigned i = 0; i < materialized->getNumOperands(); ++i)
+	{
+		auto* child = dyn_cast<ConstantExpr>(materialized->getOperand(i));
+		if (child != nullptr && constantNeedsPointerBridge(child))
+		{
+			materialized->setOperand(
+					i, materializePointerConstantExpression(child, materialized));
+		}
+	}
+	return materialized;
+}
+
+bool materializePointerConstantExpressions(Module* module)
+{
+	struct UseToMaterialize
+	{
+		Instruction* instruction;
+		unsigned operand;
+		ConstantExpr* expression;
+	};
+	std::vector<UseToMaterialize> uses;
+	for (Function& function : *module)
+	for (Instruction& instruction : instructions(function))
+	for (unsigned i = 0; i < instruction.getNumOperands(); ++i)
+	{
+		auto* expression = dyn_cast<ConstantExpr>(instruction.getOperand(i));
+		if (expression != nullptr && constantNeedsPointerBridge(expression))
+		{
+			uses.push_back({&instruction, i, expression});
+		}
+	}
+
+	for (const auto& use : uses)
+	{
+		Instruction* before = use.instruction;
+		if (auto* phi = dyn_cast<PHINode>(use.instruction))
+		{
+			before = phi->getIncomingBlock(use.operand)->getTerminator();
+		}
+		auto* value = materializePointerConstantExpression(
+				use.expression, before);
+		use.instruction->setOperand(use.operand, value);
+	}
+	return !uses.empty();
+}
+
+struct PointerCellInitializer
+{
+	GlobalVariable* cell;
+	Constant* value;
+};
+
+Value* materializeGuestConstant(
+		IRBuilder<>& builder,
+		Module* module,
+		Constant* constant,
+		Function* hostToGuest)
+{
+	auto* expression = dyn_cast<ConstantExpr>(constant);
+	if (expression == nullptr)
+	{
+		return constant;
+	}
+	if (expression->getOpcode() == Instruction::PtrToInt
+			&& expression->getType()->isIntegerTy(32)
+			&& expression->getOperand(0)->getType()->getPointerAddressSpace() == 0)
+	{
+		Value* pointer = expression->getOperand(0);
+		auto extent = getNativeObjectExtent(module, pointer);
+		return builder.CreateCall(
+				hostToGuest,
+				{pointerAsBytePointer(builder, pointer),
+				 pointerAsBytePointer(builder, extent.base),
+				 ConstantInt::get(Type::getInt32Ty(module->getContext()), extent.size)});
+	}
+
+	auto* materialized = expression->getAsInstruction();
+	for (unsigned i = 0; i < materialized->getNumOperands(); ++i)
+	{
+		auto* child = dyn_cast<Constant>(materialized->getOperand(i));
+		if (child != nullptr && constantNeedsPointerBridge(child))
+		{
+			materialized->setOperand(
+					i, materializeGuestConstant(builder, module, child, hostToGuest));
+		}
+	}
+	return builder.Insert(materialized);
+}
+
+Value* pointerCellGuestValue(
+		IRBuilder<>& builder,
+		Module* module,
+		const PointerCellInitializer& initializer,
+		Function* hostToGuest)
+{
+	auto* int32 = Type::getInt32Ty(module->getContext());
+	if (initializer.cell->getValueType()->isIntegerTy(32))
+	{
+		return materializeGuestConstant(
+				builder, module, initializer.value, hostToGuest);
+	}
+
+	if (constantNeedsPointerBridge(initializer.value))
+	{
+		Value* pointer = materializeGuestConstant(
+				builder, module, initializer.value, hostToGuest);
+		return pointer->getType()->isPointerTy()
+				? builder.Insert(new PtrToIntInst(pointer, int32))
+				: pointer;
+	}
+
+	auto extent = getNativeObjectExtent(module, initializer.value);
+	return builder.CreateCall(
+			hostToGuest,
+			{pointerAsBytePointer(builder, initializer.value),
+			 pointerAsBytePointer(builder, extent.base),
+			 ConstantInt::get(int32, extent.size)});
+}
+
+uint32_t configuredGuestAddress(Config* config, GlobalVariable* global)
+{
+	auto address = config->getGlobalAddress(global);
+	return address.isDefined() && address.getValue() <= UINT32_MAX
+			? static_cast<uint32_t>(address.getValue())
+			: 0;
+}
+
+uint32_t configuredGuestAddress(Config* config, Function* function)
+{
+	auto address = config->getFunctionAddress(function);
+	return address.isDefined() && address.getValue() <= UINT32_MAX
+			? static_cast<uint32_t>(address.getValue())
+			: 0;
+}
+
+uint32_t configuredFunctionExtent(Config* config, Function* function)
+{
+	auto* configured = config->getConfigFunction(function);
+	if (configured == nullptr
+			|| configured->getStart().isUndefined()
+			|| configured->getEnd().isUndefined()
+			|| configured->getEnd().getValue() <= configured->getStart().getValue())
+	{
+		return 1;
+	}
+	return static_cast<uint32_t>(std::min(
+			configured->getEnd().getValue() - configured->getStart().getValue(),
+			uint64_t{UINT32_MAX}));
 }
 
 } // anonymous namespace
@@ -255,6 +449,29 @@ bool Pe32PointerBridge::run()
 
 	auto& context = _module->getContext();
 	auto* int32 = Type::getInt32Ty(context);
+	bool changed = materializePointerConstantExpressions(_module);
+	std::vector<PointerCellInitializer> pointerInitializers;
+	for (GlobalVariable& global : _module->globals())
+	{
+		if (!global.hasInitializer())
+		{
+			continue;
+		}
+		auto* initializer = global.getInitializer();
+		const bool pointerCell = global.getValueType()->isPointerTy()
+				&& global.getValueType()->getPointerAddressSpace() == 0;
+		const bool integerRelocationCell = global.getValueType()->isIntegerTy(32)
+				&& constantNeedsPointerBridge(initializer);
+		if ((pointerCell || integerRelocationCell)
+				&& !initializer->isNullValue()
+				&& !isa<UndefValue>(initializer))
+		{
+			pointerInitializers.push_back({&global, initializer});
+			global.setInitializer(Constant::getNullValue(global.getValueType()));
+			global.setConstant(false);
+			changed = true;
+		}
+	}
 	std::vector<PtrToIntInst*> hostEscapes;
 	std::vector<IntToPtrInst*> guestDereferences;
 	std::vector<AddrSpaceCastInst*> addressSpaceCasts;
@@ -302,11 +519,26 @@ bool Pe32PointerBridge::run()
 			}
 		}
 	}
+	bool hasConfiguredMappings = false;
+	for (GlobalVariable& global : _module->globals())
+	{
+		hasConfiguredMappings = hasConfiguredMappings
+				|| (!global.isDeclaration()
+						&& configuredGuestAddress(_config, &global) != 0);
+	}
+	for (Function& function : *_module)
+	{
+		hasConfiguredMappings = hasConfiguredMappings
+				|| (!function.isDeclaration()
+						&& configuredGuestAddress(_config, &function) != 0);
+	}
 	if (hostEscapes.empty()
 			&& guestDereferences.empty()
-			&& addressSpaceCasts.empty())
+			&& addressSpaceCasts.empty()
+			&& pointerInitializers.empty()
+			&& !hasConfiguredMappings)
 	{
-		return false;
+		return changed;
 	}
 
 	auto* bytePointer = Type::getInt8PtrTy(context);
@@ -324,10 +556,107 @@ bool Pe32PointerBridge::run()
 		return false;
 	}
 
+	auto* registerObject = getOrCreateBridgeFunction(
+			_module,
+			"retdec_pe32_register_host_object",
+			FunctionType::get(int32, {bytePointer, int32, int32}, false));
+	auto* registerFunction = getOrCreateBridgeFunction(
+			_module,
+			"retdec_pe32_register_host_function",
+			FunctionType::get(int32, {bytePointer, int32}, false));
+	if (registerObject == nullptr || registerFunction == nullptr)
+	{
+		return false;
+	}
+
+	auto* initializerType = FunctionType::get(Type::getVoidTy(context), false);
+	auto* initializer = Function::Create(
+			initializerType,
+			GlobalValue::InternalLinkage,
+			"__retdec_pe32_initialize_mappings",
+			_module);
+	auto* entry = BasicBlock::Create(context, "entry", initializer);
+	IRBuilder<> initializerBuilder(entry);
+	bool initializerNeeded = false;
+	for (GlobalVariable& global : _module->globals())
+	{
+		if (global.isDeclaration())
+		{
+			continue;
+		}
+		const uint32_t guestAddress = configuredGuestAddress(_config, &global);
+		if (guestAddress == 0)
+		{
+			continue;
+		}
+		auto extent = getNativeObjectExtent(_module, &global);
+		initializerBuilder.CreateCall(
+				registerObject,
+				{pointerAsBytePointer(initializerBuilder, &global),
+				 ConstantInt::get(int32, extent.size),
+				 ConstantInt::get(int32, guestAddress)});
+		initializerNeeded = true;
+	}
+	for (Function& function : *_module)
+	{
+		if (function.isDeclaration() || &function == initializer)
+		{
+			continue;
+		}
+		const uint32_t guestAddress = configuredGuestAddress(_config, &function);
+		if (guestAddress == 0)
+		{
+			continue;
+		}
+		initializerBuilder.CreateCall(
+				registerFunction,
+				{pointerAsBytePointer(initializerBuilder, &function),
+				 ConstantInt::get(int32, guestAddress)});
+		initializerNeeded = true;
+	}
+	for (const auto& pointerInitializer : pointerInitializers)
+	{
+		Value* guest = pointerCellGuestValue(
+				initializerBuilder, _module, pointerInitializer, hostToGuest);
+		if (guest->getType() != int32)
+		{
+			guest = initializerBuilder.CreateIntCast(guest, int32, false);
+		}
+		auto* guestCell = initializerBuilder.CreateBitCast(
+				pointerInitializer.cell,
+				PointerType::get(int32, 0));
+		auto* store = initializerBuilder.CreateStore(guest, guestCell);
+		store->setAlignment(4);
+		initializerNeeded = true;
+	}
+	initializerBuilder.CreateRetVoid();
+	if (initializerNeeded)
+	{
+		appendToGlobalCtors(*_module, initializer, 101);
+		changed = true;
+	}
+	else
+	{
+		initializer->eraseFromParent();
+	}
+
 	for (PtrToIntInst* escape : hostEscapes)
 	{
 		IRBuilder<> builder(escape);
 		Value* pointer = escape->getPointerOperand();
+		if (auto* cast = dyn_cast<AddrSpaceCastInst>(pointer))
+		{
+			auto* sourceType = llvm::cast<PointerType>(cast->getSrcTy());
+			if (sourceType->getAddressSpace()
+					== Pe32PointerLegalization::GuestPointerAddressSpace)
+			{
+				auto* guest = builder.CreatePtrToInt(
+						cast->getOperand(0), int32, escape->getName() + ".guest");
+				escape->replaceAllUsesWith(guest);
+				escape->eraseFromParent();
+				continue;
+			}
+		}
 		auto extent = getNativeObjectExtent(_module, pointer);
 		auto* call = builder.CreateCall(
 				hostToGuest,
@@ -356,6 +685,11 @@ bool Pe32PointerBridge::run()
 
 	for (AddrSpaceCastInst* cast : addressSpaceCasts)
 	{
+		if (cast->use_empty())
+		{
+			cast->eraseFromParent();
+			continue;
+		}
 		IRBuilder<> builder(cast);
 		auto* sourceType = llvm::cast<PointerType>(cast->getSrcTy());
 		Value* replacement = nullptr;
@@ -381,7 +715,8 @@ bool Pe32PointerBridge::run()
 		cast->eraseFromParent();
 	}
 
-	return !hostEscapes.empty()
+	return changed
+			|| !hostEscapes.empty()
 			|| !guestDereferences.empty()
 			|| !addressSpaceCasts.empty();
 }

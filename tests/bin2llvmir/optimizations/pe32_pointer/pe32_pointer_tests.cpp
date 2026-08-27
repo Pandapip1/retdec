@@ -36,6 +36,22 @@ class Pe32PointerLegalizationTests: public LlvmIrTests
 			return config;
 		}
 
+		void addGlobalAddress(Config& config, StringRef name, uint32_t address)
+		{
+			config.getConfig().globals.insert(retdec::common::Object(
+					name.str(), retdec::common::Storage::inMemory(address)));
+		}
+
+		void addFunctionRange(
+				Config& config,
+				StringRef name,
+				uint32_t start,
+				uint32_t end)
+		{
+			config.getConfig().functions.insert(retdec::common::Function(
+					start, end, name.str()));
+		}
+
 		Pe32PointerLegalization pass;
 		Pe32PointerBridge bridge;
 };
@@ -279,6 +295,201 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_EQ(1u, decodes);
 	EXPECT_EQ(1u, guestLoads);
 	EXPECT_EQ(1u, guestStores);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeInitializesPointerGlobalsThroughPicSafeRuntimeConstructor)
+{
+	parseInput(R"(
+		@target = global [8 x i8] zeroinitializer
+		@pointer = global i8* getelementptr (
+			[8 x i8], [8 x i8]* @target, i32 0, i32 3)
+		define i8* @func() {
+			%value = load i8*, i8** @pointer, align 4
+			ret i8* %value
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "target", 0x401000);
+	addGlobalAddress(config, "pointer", 0x402000);
+	addFunctionRange(config, "func", 0x403000, 0x403020);
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, &config));
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* pointer = module->getGlobalVariable("pointer");
+	ASSERT_NE(nullptr, pointer);
+	ASSERT_TRUE(pointer->hasInitializer());
+	EXPECT_TRUE(pointer->getInitializer()->isNullValue());
+	auto* initializer = module->getFunction(
+			"__retdec_pe32_initialize_mappings");
+	ASSERT_NE(nullptr, initializer);
+
+	unsigned objectRegistrations = 0;
+	unsigned functionRegistrations = 0;
+	unsigned encodedInitializers = 0;
+	unsigned fourBytePointerStores = 0;
+	for (Instruction& instruction : instructions(initializer))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			auto* called = call->getCalledFunction();
+			if (called != nullptr
+					&& called->getName() == "retdec_pe32_register_host_object")
+			{
+				++objectRegistrations;
+			}
+			else if (called != nullptr
+					&& called->getName()
+							== "retdec_pe32_register_host_function")
+			{
+				++functionRegistrations;
+			}
+			else if (called != nullptr
+					&& called->getName()
+							== "__retdec_pe32_host_to_guest")
+			{
+				++encodedInitializers;
+			}
+		}
+		else if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			fourBytePointerStores += store->getValueOperand()->getType()
+					->isIntegerTy(32) && store->getAlignment() == 4;
+		}
+	}
+	EXPECT_EQ(2u, objectRegistrations);
+	EXPECT_EQ(1u, functionRegistrations);
+	EXPECT_EQ(1u, encodedInitializers);
+	EXPECT_EQ(1u, fourBytePointerStores);
+	EXPECT_NE(nullptr, module->getGlobalVariable("llvm.global_ctors"));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeInitializesIntegerAndPointerRelocationCellsAsFourByteGuests)
+{
+	parseInput(R"(
+		@target = global [8 x i8] zeroinitializer
+		@integer.host = global i32 ptrtoint ([8 x i8]* @target to i32)
+		@pointer.guest = global i8* inttoptr (i32 4198400 to i8*)
+		@pointer.nested = global i8* inttoptr (i32 add (
+			i32 ptrtoint ([8 x i8]* @target to i32), i32 5) to i8*)
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "target", 0x401000);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	for (StringRef name : {"integer.host", "pointer.guest", "pointer.nested"})
+	{
+		auto* global = module->getGlobalVariable(name);
+		ASSERT_NE(nullptr, global);
+		EXPECT_TRUE(global->getInitializer()->isNullValue());
+	}
+
+	auto* initializer = module->getFunction(
+			"__retdec_pe32_initialize_mappings");
+	ASSERT_NE(nullptr, initializer);
+	unsigned encodes = 0;
+	unsigned stores = 0;
+	bool preservedGuestAddress = false;
+	for (Instruction& instruction : instructions(initializer))
+	{
+		for (Value* operand : instruction.operands())
+		{
+			if (auto* value = dyn_cast<ConstantInt>(operand))
+			{
+				preservedGuestAddress |= value->getZExtValue() == 0x401000;
+			}
+		}
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			auto* called = call->getCalledFunction();
+			encodes += called != nullptr
+					&& called->getName() == "__retdec_pe32_host_to_guest";
+		}
+		else if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			if (store->getValueOperand()->getType()->isIntegerTy(32))
+			{
+				++stores;
+				EXPECT_EQ(4u, store->getAlignment());
+			}
+		}
+	}
+	EXPECT_EQ(2u, encodes);
+	EXPECT_EQ(3u, stores);
+	EXPECT_TRUE(preservedGuestAddress);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgePreservesGuestToNativeToIntegerRoundTripWithoutHostEncoding)
+{
+	parseInput(R"(
+		define i32 @func(i32 addrspace(271)* %guest) {
+			%native = addrspacecast i32 addrspace(271)* %guest to i32*
+			%address = ptrtoint i32* %native to i32
+			ret i32 %address
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	unsigned encodes = 0;
+	unsigned rawGuestCasts = 0;
+	for (Instruction& instruction : instructions(*module->getFunction("func")))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			auto* called = call->getCalledFunction();
+			encodes += called != nullptr
+					&& called->getName() == "__retdec_pe32_host_to_guest";
+		}
+		else if (auto* cast = dyn_cast<PtrToIntInst>(&instruction))
+		{
+			rawGuestCasts += cast->getPointerOperand()->getType()
+					->getPointerAddressSpace()
+				== Pe32PointerLegalization::GuestPointerAddressSpace;
+		}
+	}
+	EXPECT_EQ(0u, encodes);
+	EXPECT_EQ(1u, rawGuestCasts);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeMaterializesNestedConstantPointerExpressions)
+{
+	parseInput(R"(
+		@target = global [8 x i8] zeroinitializer
+		define i8* @func() {
+			ret i8* inttoptr (i32 add (
+				i32 ptrtoint ([8 x i8]* @target to i32), i32 5) to i8*)
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	unsigned encodes = 0;
+	unsigned decodes = 0;
+	for (Instruction& instruction : instructions(*module->getFunction("func")))
+	{
+		for (Value* operand : instruction.operands())
+		{
+			EXPECT_EQ(nullptr, dyn_cast<ConstantExpr>(operand));
+		}
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			auto* called = call->getCalledFunction();
+			encodes += called != nullptr
+					&& called->getName() == "__retdec_pe32_host_to_guest";
+			decodes += called != nullptr
+					&& called->getName() == "__retdec_pe32_guest_to_host";
+		}
+	}
+	EXPECT_EQ(1u, encodes);
+	EXPECT_EQ(1u, decodes);
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
