@@ -1027,6 +1027,13 @@ void ParamReturn::applyToIr()
 void ParamReturn::applyToIr(DataFlowEntry& de)
 {
 	Function* fnc = de.getFunction();
+	// Capstone pseudo-instruction helpers already have an instruction-defined
+	// ABI.  In particular, operandless helpers such as x86 WAIT must not absorb
+	// unrelated values left in the emulated guest stack at their call sites.
+	if (fnc != nullptr && fnc->getName().startswith("__asm_"))
+	{
+		return;
+	}
 
 	if (fnc == nullptr)
 	{

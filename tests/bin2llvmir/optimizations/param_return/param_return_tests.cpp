@@ -275,6 +275,59 @@ TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86KeepsPseudoWaitHelperZeroArgumentAbi)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@result = global i32 0
+		declare i32 @__asm_wait()
+		define void @fnc(i32 %input) {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 %input, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 55, i32* %slot2
+			store i32 %sp2, i32* @esp
+			%wait = call i32 @__asm_wait()
+			store i32 %wait, i32* @result
+			ret void
+		}
+	)");
+	auto c = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto config = Config::fromConfig(module.get(), c);
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	auto* wait = module->getFunction("__asm_wait");
+	ASSERT_NE(nullptr, wait);
+	EXPECT_TRUE(wait->isDeclaration());
+	EXPECT_TRUE(wait->getReturnType()->isIntegerTy(32));
+	EXPECT_EQ(0u, wait->arg_size());
+	auto* call = dyn_cast<CallInst>(getValueByName("wait"));
+	ASSERT_NE(nullptr, call);
+	EXPECT_EQ(wait, call->getCalledFunction());
+	EXPECT_EQ(0u, call->getNumArgOperands());
+}
+
 TEST_F(ParamReturnTests, x86PreservesUnusedMiddleStackArgumentPosition)
 {
 	parseInput(R"(
