@@ -452,6 +452,56 @@ TEST_F(ParamReturnTests, x86ExternalCallUnresolvedUnaryPushIsNotDropped)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare i32 @consume()
+		define void @fnc(i32 %input) {
+			%pushed = add i32 %input, 1
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot = inttoptr i32 %sp1 to i32*
+			store i32 %pushed, i32* %slot
+			store i32 %sp1, i32* @esp
+			call i32 @consume()
+			ret void
+		}
+	)");
+	auto config = Config::fromJsonString(module.get(), R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"registers" : [
+			{
+				"name" : "esp",
+				"storage" : { "type" : "register", "value" : "esp" }
+			}
+		]
+	})");
+	auto abi = AbiProvider::addAbi(module.get(), &config);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+
+	std::string exp = R"(
+		@esp = global i32 0
+		declare void @consume(i32)
+		declare i32 @0()
+		define void @fnc(i32 %input) {
+			%pushed = add i32 %input, 1
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot = inttoptr i32 %sp1 to i32*
+			store i32 %sp1, i32* @esp
+			call void @consume(i32 %pushed)
+			ret void
+		}
+	)";
+	checkModuleAgainstExpectedIr(exp);
+}
+
 TEST_F(ParamReturnTests, x86CallerCleanupBoundsRecoveredPushArguments)
 {
 	parseInput(R"(

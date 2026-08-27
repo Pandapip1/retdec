@@ -1525,8 +1525,9 @@ void DataFlowEntry::applyToIrOrdinary()
 			{
 				if (!p.second.empty())
 				{
-					auto* l = cast<LoadInst>(p.second.back());
-					if (_config->isStackVariable(l->getPointerOperand()))
+					auto* l = dyn_cast<LoadInst>(p.second.back());
+					if (l != nullptr
+							&& _config->isStackVariable(l->getPointerOperand()))
 					{
 						stackOff = _config->getStackVariableOffset(l->getPointerOperand());
 						stackOff = stackOff + 4;
