@@ -982,6 +982,105 @@ void DataFlowEntry::addCallArgs(llvm::CallInst* call, CallEntry& ce)
 			}
 		}
 	}
+
+	// A caller-side ESP adjustment gives an exact upper bound on the number of
+	// x86 stack arguments.  Without this bound, a store of the preceding call's
+	// result into an ordinary stack local can be mistaken for one more argument
+	// after unresolved push stores have been recovered.
+	if (_config->getConfig().architecture.isX86())
+	{
+		unsigned cleanupBytes = 0;
+		for (auto* next = call->getNextNode(); next != nullptr;
+				next = next->getNextNode())
+		{
+			if (auto* nextCall = dyn_cast<CallInst>(next))
+			{
+				auto* called = nextCall->getCalledFunction();
+				if (called == nullptr || !called->isIntrinsic())
+				{
+					break;
+				}
+			}
+			auto* store = dyn_cast<StoreInst>(next);
+			if (store == nullptr
+					|| !_config->isStackPointerRegister(store->getPointerOperand()))
+			{
+				continue;
+			}
+			auto* stackPointer = store->getPointerOperand();
+			auto* addition = dyn_cast<BinaryOperator>(
+					llvm_utils::skipCasts(store->getValueOperand()));
+			if (addition == nullptr || addition->getOpcode() != Instruction::Add)
+			{
+				continue;
+			}
+			for (unsigned operand = 0; operand < 2; ++operand)
+			{
+				auto* amount = dyn_cast<ConstantInt>(addition->getOperand(operand));
+				auto* load = dyn_cast<LoadInst>(llvm_utils::skipCasts(
+						addition->getOperand(1 - operand)));
+				if (amount != nullptr && amount->getSExtValue() > 0
+						&& load != nullptr
+						&& load->getPointerOperand() == stackPointer)
+				{
+					cleanupBytes = amount->getZExtValue();
+					break;
+				}
+			}
+			if (cleanupBytes != 0)
+			{
+				break;
+			}
+		}
+		// Stack analysis may replace the restored ESP value with a pointer to
+		// the recovered frame, leaving the original add dead.  In that case the
+		// machine instruction remains the authoritative cleanup-size source.
+		if (cleanupBytes == 0)
+		{
+			auto nextAsm = AsmInstruction(call).getNext();
+			auto* instruction = nextAsm.isValid()
+					? nextAsm.getCapstoneInsn() : nullptr;
+			if (instruction != nullptr && instruction->id == X86_INS_ADD
+					&& instruction->detail != nullptr)
+			{
+				auto& x86 = instruction->detail->x86;
+				if (x86.op_count == 2
+						&& x86.operands[0].type == X86_OP_REG
+						&& (x86.operands[0].reg == X86_REG_SP
+								|| x86.operands[0].reg == X86_REG_ESP
+								|| x86.operands[0].reg == X86_REG_RSP)
+						&& x86.operands[1].type == X86_OP_IMM
+						&& x86.operands[1].imm > 0
+						&& static_cast<uint64_t>(x86.operands[1].imm)
+								<= std::numeric_limits<unsigned>::max())
+				{
+					cleanupBytes = static_cast<unsigned>(x86.operands[1].imm);
+				}
+			}
+		}
+
+		unsigned slotSize = _config->getConfig().architecture.getByteSize();
+		if (cleanupBytes != 0 && slotSize != 0)
+		{
+			unsigned maximumStackArgs = cleanupBytes / slotSize;
+			unsigned stackArgs = 0;
+			auto it = ce.possibleArgStores.begin();
+			while (it != ce.possibleArgStores.end())
+			{
+				auto* store = *it;
+				if (ce.isStackArgumentStore(_config, store)
+						&& ++stackArgs > maximumStackArgs)
+				{
+					ce.unresolvedStackArgStores.erase(store);
+					it = ce.possibleArgStores.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+		}
+	}
 }
 
 void DataFlowEntry::addCallReturns(llvm::CallInst* call, CallEntry& ce)
