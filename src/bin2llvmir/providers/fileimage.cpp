@@ -4,6 +4,9 @@
  * @copyright (c) 2017 Avast Software, licensed under the MIT license
  */
 
+#include <cstdint>
+#include <vector>
+
 #include "retdec/utils/string.h"
 #include "retdec/bin2llvmir/providers/fileimage.h"
 #include "retdec/bin2llvmir/utils/ir_modifier.h"
@@ -182,12 +185,20 @@ llvm::Constant* FileImage::getConstantLongDouble(retdec::common::Address addr)
 		return nullptr;
 	}
 
-	long double v = 0.0;
-	auto* t = Type::getX86_FP80Ty(_module->getContext());
-	auto b = _image->get10Byte(addr, v);
-	std::stringstream ss;
-	ss << v;
-	return b ? ConstantFP::get(t, StringRef(ss.str().c_str())) : nullptr;
+	std::vector<std::uint8_t> bytes;
+	if (!_image->getXBytes(addr, 10, bytes) || bytes.size() != 10)
+	{
+		return nullptr;
+	}
+
+	llvm::APInt bits(80, 0);
+	for (std::size_t i = 0; i < bytes.size(); ++i)
+	{
+		auto byteIndex = _image->isLittleEndian() ? i : bytes.size() - 1 - i;
+		bits |= llvm::APInt(80, bytes[byteIndex]) << (i * 8);
+	}
+	auto value = llvm::APFloat(llvm::APFloat::x87DoubleExtended, bits);
+	return ConstantFP::get(_module->getContext(), value);
 }
 
 llvm::Constant* FileImage::getConstantCharPointer(retdec::common::Address addr)
