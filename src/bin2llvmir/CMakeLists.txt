@@ -113,6 +113,22 @@ add_library(bin2llvmir STATIC
 )
 add_library(retdec::bin2llvmir ALIAS bin2llvmir)
 
+add_library(pe32-runtime SHARED
+	pe32_runtime.cpp
+)
+add_library(retdec::pe32-runtime ALIAS pe32-runtime)
+
+target_compile_features(pe32-runtime PUBLIC cxx_std_17)
+target_include_directories(pe32-runtime
+	PUBLIC
+		$<BUILD_INTERFACE:${RETDEC_INCLUDE_DIR}>
+		$<INSTALL_INTERFACE:${RETDEC_INSTALL_INCLUDE_DIR}>
+)
+set_target_properties(pe32-runtime
+	PROPERTIES
+		OUTPUT_NAME "retdec-pe32-runtime"
+)
+
 target_compile_features(bin2llvmir PUBLIC cxx_std_17)
 
 target_include_directories(bin2llvmir
@@ -152,7 +168,7 @@ install(
 )
 
 # Install libs.
-install(TARGETS bin2llvmir
+install(TARGETS bin2llvmir pe32-runtime
 	EXPORT bin2llvmir-targets
 	ARCHIVE DESTINATION ${RETDEC_INSTALL_LIB_DIR}
 	LIBRARY DESTINATION ${RETDEC_INSTALL_LIB_DIR}

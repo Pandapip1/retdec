@@ -20,6 +20,7 @@ add_executable(tests-bin2llvmir
 	optimizations/x86_addr_spaces/x86_addr_spaces_pass_test.cpp
 	optimizations/x86_addr_spaces/x86_addr_spaces_test.cpp
 	optimizations/x87_fpu/x87_fpu_test.cpp
+	pe32_runtime_tests.cpp
 	providers/asm_instruction_tests.cpp
 	providers/config_tests.cpp
 	providers/debugformat_tests.cpp
@@ -40,6 +41,7 @@ target_include_directories(tests-bin2llvmir
 
 target_link_libraries(tests-bin2llvmir
 	retdec::bin2llvmir
+	retdec::pe32-runtime
 	retdec::utils
 	retdec::deps::gmock_main
 )
