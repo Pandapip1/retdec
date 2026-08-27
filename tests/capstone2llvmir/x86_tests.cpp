@@ -3895,6 +3895,39 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_NEG_reg64)
 	EXPECT_NO_VALUE_CALLED();
 }
 
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_SBB_selfConsumesBorrowFromNegBeforeInc)
+{
+	SKIP_MODE_16;
+
+	setRegisters({
+		{X86_REG_EAX, 0x1234},
+	});
+
+	emulate("neg eax; sbb eax, eax; inc eax");
+
+	// NEG of a nonzero value sets CF.  SBB EAX,EAX must therefore produce
+	// -1, and the following INC produces zero.  Adding CF in SBB incorrectly
+	// produced +1 followed by 2.
+	EXPECT_EQ(0u, getRegisterValueUnsigned(X86_REG_EAX));
+	EXPECT_NO_MEMORY_LOADED_STORED();
+	EXPECT_NO_VALUE_CALLED();
+}
+
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_SBB_selfWithoutBorrowBeforeInc)
+{
+	SKIP_MODE_16;
+
+	setRegisters({
+		{X86_REG_EAX, 0},
+	});
+
+	emulate("neg eax; sbb eax, eax; inc eax");
+
+	EXPECT_EQ(1u, getRegisterValueUnsigned(X86_REG_EAX));
+	EXPECT_NO_MEMORY_LOADED_STORED();
+	EXPECT_NO_VALUE_CALLED();
+}
+
 //
 // X86_INS_NOP, X86_INS_UD2, X86_INS_UD2B, X86_INS_FNOP, X86_INS_HLT
 //

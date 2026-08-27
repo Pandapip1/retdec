@@ -3302,7 +3302,7 @@ void Capstone2LlvmIrTranslatorX86_impl::translateSbb(cs_insn* i, cs_x86* xi, llv
 	auto* cf = loadRegister(X86_REG_CF, irb, op0->getType(), eOpConv::ZEXT_TRUNC);
 
 	auto* sub1 = irb.CreateSub(op0, op1);
-	auto* sub = irb.CreateAdd(sub1, cf); // Yes, this really is add.
+	auto* sub = irb.CreateSub(sub1, cf);
 
 	storeRegistersPlusSflags(irb, sub, {
 			{X86_REG_AF, generateBorrowSubCInt4(op0, op1, irb)},
