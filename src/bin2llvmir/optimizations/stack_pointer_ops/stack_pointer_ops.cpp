@@ -22,6 +22,7 @@
 #include "retdec/utils/string.h"
 #include "retdec/bin2llvmir/optimizations/stack_pointer_ops/stack_pointer_ops.h"
 #include "retdec/bin2llvmir/utils/debug.h"
+#include "retdec/bin2llvmir/utils/ir_modifier.h"
 
 using namespace retdec::utils;
 using namespace llvm;
@@ -49,16 +50,54 @@ bool coalesceStackFrame(Module* module, Config* config, Function& function)
 	};
 
 	std::vector<StackObject> objects;
-	int64_t minimumOffset = std::numeric_limits<int64_t>::max();
-	int64_t maximumEnd = std::numeric_limits<int64_t>::min();
-	unsigned maximumAlignment = 1;
+	std::vector<AllocaInst*> allocas;
 	for (Instruction& instruction : function.getEntryBlock())
 	{
-		auto* alloca = dyn_cast<AllocaInst>(&instruction);
-		if (alloca == nullptr)
+		if (auto* alloca = dyn_cast<AllocaInst>(&instruction))
+		{
+			allocas.push_back(alloca);
+		}
+	}
+
+	// Simple type recovery may select a type wider than the machine stack
+	// object recorded by the decoder.  That is harmless while each recovered
+	// local has an independent alloca, but it changes the program once adjacent
+	// objects are put back into their real, overlapping frame.  Restore the
+	// configured element width before coalescing; IrModifier keeps the inferred
+	// SSA type by inserting conversions around the original-width memory access.
+	IrModifier modifier(module, config);
+	for (auto*& alloca : allocas)
+	{
+		auto* stackObject = config->getConfigStackVariable(alloca);
+		if (stackObject == nullptr || !stackObject->type.isDefined())
 		{
 			continue;
 		}
+		auto* configuredType = llvm_utils::stringToLlvmType(
+				module->getContext(), stackObject->type.getLlvmIr());
+		if (configuredType != nullptr && configuredType->isPointerTy())
+		{
+			configuredType = configuredType->getPointerElementType();
+		}
+		if (configuredType == nullptr || !configuredType->isSized()
+				|| !alloca->getAllocatedType()->isSized())
+		{
+			continue;
+		}
+		if (module->getDataLayout().getTypeAllocSize(configuredType)
+				< module->getDataLayout().getTypeAllocSize(
+						alloca->getAllocatedType()))
+		{
+			alloca = cast<AllocaInst>(modifier.changeObjectType(
+					nullptr, alloca, configuredType));
+		}
+	}
+
+	int64_t minimumOffset = std::numeric_limits<int64_t>::max();
+	int64_t maximumEnd = std::numeric_limits<int64_t>::min();
+	unsigned maximumAlignment = 1;
+	for (auto* alloca : allocas)
+	{
 		if (alloca->getName() == "stack_frame")
 		{
 			return false;
