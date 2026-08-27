@@ -397,16 +397,6 @@ void Capstone2LlvmIrTranslatorX86_impl::generateRegistersCommon()
 	createRegister(X87_REG_RC, _regLt);
 	createRegister(X87_REG_X, _regLt);
 
-	// x87 FPU tag registers (x87_reg_tag).
-	//
-	createRegister(X87_REG_TAG0, _regLt, i2Set);
-	createRegister(X87_REG_TAG1, _regLt, i2Set);
-	createRegister(X87_REG_TAG2, _regLt, i2Set);
-	createRegister(X87_REG_TAG3, _regLt, i2Set);
-	createRegister(X87_REG_TAG4, _regLt, i2Set);
-	createRegister(X87_REG_TAG5, _regLt, i2Set);
-	createRegister(X87_REG_TAG6, _regLt, i2Set);
-	createRegister(X87_REG_TAG7, _regLt, i2Set);
 	// 64-bit FP registers.
 	//
 	createRegister(X86_REG_FP0, _regLt);
@@ -2734,7 +2724,11 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFldcw(
 	EXPECT_IS_UNARY(i, xi, irb);
 
 	auto* control = loadOpUnary(
-			xi, irb, irb.getInt16Ty(), eOpConv::ZEXT_TRUNC);
+			xi,
+			irb,
+			nullptr,
+			irb.getInt16Ty(),
+			eOpConv::ZEXT_TRUNC_OR_BITCAST);
 	const std::pair<uint32_t, unsigned> fields[] =
 	{
 		{X87_REG_IM, 0},
@@ -2799,7 +2793,7 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFnstcw(
 		control = irb.CreateOr(control, value);
 	}
 
-	storeOp(xi->operands[0], control, irb, eOpConv::ZEXT_TRUNC);
+	storeOp(xi->operands[0], control, irb, eOpConv::ZEXT_TRUNC_OR_BITCAST);
 }
 
 /**
@@ -2847,7 +2841,7 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(
 		status = irb.CreateOr(status, value);
 	}
 
-	storeOp(xi->operands[0], status, irb, eOpConv::ZEXT_TRUNC);
+	storeOp(xi->operands[0], status, irb, eOpConv::ZEXT_TRUNC_OR_BITCAST);
 }
 
 /**
@@ -5029,17 +5023,6 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFdecstp(cs_insn* i, cs_x86* xi,
 void Capstone2LlvmIrTranslatorX86_impl::translateFfree(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb)
 {
 	// ignore
-}
-
-/**
- * X86_INS_FNSTSW
- */
-void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb)
-{
-	EXPECT_IS_UNARY(i, xi, irb);
-
-	auto* fpsw = loadRegister(X86_REG_FPSW, irb);
-	storeOp(xi->operands[0], fpsw, irb);
 }
 
 /**

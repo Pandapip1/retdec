@@ -197,7 +197,7 @@ llvm::Constant* FileImage::getConstantLongDouble(retdec::common::Address addr)
 		auto byteIndex = _image->isLittleEndian() ? i : bytes.size() - 1 - i;
 		bits |= llvm::APInt(80, bytes[byteIndex]) << (i * 8);
 	}
-	auto value = llvm::APFloat(llvm::APFloat::x87DoubleExtended, bits);
+	auto value = llvm::APFloat(llvm::APFloat::x87DoubleExtended(), bits);
 	return ConstantFP::get(_module->getContext(), value);
 }
 

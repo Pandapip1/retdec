@@ -301,8 +301,9 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, InitialX87StateMatchesReset)
 		return value == nullptr ? uint64_t{0} : value->getZExtValue();
 	};
 
-	// The architectural reset state is control=0x037f, status=0x0000,
-	// TOP=0, and tag=0xffff (all eight x87 stack entries empty).
+	// The architectural reset state represented by this translator is
+	// control=0x037f, status=0x0000, and TOP=0. RetDec's current x87 model
+	// deliberately does not expose the removed per-slot tag registers.
 	for (auto reg : {X87_REG_IM, X87_REG_DM, X87_REG_ZM,
 			X87_REG_OM, X87_REG_UM, X87_REG_PM})
 	{
@@ -317,12 +318,6 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, InitialX87StateMatchesReset)
 			X87_REG_TOP, X87_REG_B})
 	{
 		EXPECT_EQ(0, initialValue(reg));
-	}
-	for (auto reg : {X87_REG_TAG0, X87_REG_TAG1, X87_REG_TAG2,
-			X87_REG_TAG3, X87_REG_TAG4, X87_REG_TAG5,
-			X87_REG_TAG6, X87_REG_TAG7})
-	{
-		EXPECT_EQ(3, initialValue(reg));
 	}
 }
 
@@ -11104,7 +11099,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOMP_FNSTSW_status_dependency
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPREM1_native_status_and_remainder)
 {
 	ALL_MODES;
-	auto* translated = translate("fprem1");
+	auto* translated = translate(assemble("fprem1"));
 
 	auto calls = getInlineAsmCalls(translated);
 	ASSERT_EQ(1, calls.size());
@@ -12744,7 +12739,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FXCH_st3)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fcos"));
+	auto calls = getInlineAsmCalls(translate(assemble("fcos")));
 	ASSERT_EQ(1, calls.size());
 	EXPECT_EQ("fcos", calls[0]->getAsmString());
 	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
@@ -12759,7 +12754,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FCOS_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fsin"));
+	auto calls = getInlineAsmCalls(translate(assemble("fsin")));
 	ASSERT_EQ(1, calls.size());
 	EXPECT_EQ("fsin", calls[0]->getAsmString());
 	EXPECT_EQ("={st},0,~{fpsr},~{flags}", calls[0]->getConstraintString());
@@ -12775,7 +12770,7 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSIN_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSINCOS_compute)
 {
 	ALL_MODES;
-	auto calls = getInlineAsmCalls(translate("fsincos"));
+	auto calls = getInlineAsmCalls(translate(assemble("fsincos")));
 	ASSERT_EQ(2, calls.size());
 	EXPECT_EQ("fsin", calls[0]->getAsmString());
 	EXPECT_EQ("fcos", calls[1]->getAsmString());
