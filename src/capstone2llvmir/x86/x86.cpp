@@ -2708,6 +2708,54 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFninit(cs_insn* i, cs_x86* xi, 
 }
 
 /**
+ * X86_INS_FNSTSW
+ *
+ * Materialize the architectural x87 status word from the individual status
+ * registers used by the translator.  Leaving this instruction unsupported
+ * emits an opaque pseudo-call which is disconnected from C0--C3; optimizers
+ * may then remove the comparison which produced those flags.
+ */
+void Capstone2LlvmIrTranslatorX86_impl::translateFnstsw(
+		cs_insn* i,
+		cs_x86* xi,
+		llvm::IRBuilder<>& irb)
+{
+	EXPECT_IS_UNARY(i, xi, irb);
+
+	auto* i16t = irb.getInt16Ty();
+	llvm::Value* status = irb.getInt16(0);
+	const std::pair<uint32_t, unsigned> fields[] =
+	{
+		{X87_REG_IE, 0},
+		{X87_REG_DE, 1},
+		{X87_REG_ZE, 2},
+		{X87_REG_OE, 3},
+		{X87_REG_UE, 4},
+		{X87_REG_PE, 5},
+		{X87_REG_SF, 6},
+		{X87_REG_ES, 7},
+		{X87_REG_C0, 8},
+		{X87_REG_C1, 9},
+		{X87_REG_C2, 10},
+		{X87_REG_TOP, 11},
+		{X87_REG_C3, 14},
+		{X87_REG_B, 15},
+	};
+
+	for (const auto& field : fields)
+	{
+		auto* value = irb.CreateZExt(loadRegister(field.first, irb), i16t);
+		if (field.second != 0)
+		{
+			value = irb.CreateShl(value, field.second);
+		}
+		status = irb.CreateOr(status, value);
+	}
+
+	storeOp(xi->operands[0], status, irb, eOpConv::ZEXT_TRUNC);
+}
+
+/**
  * X86_INS_NOT
  */
 void Capstone2LlvmIrTranslatorX86_impl::translateNot(cs_insn* i, cs_x86* xi, llvm::IRBuilder<>& irb)
