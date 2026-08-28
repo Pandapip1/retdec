@@ -277,7 +277,8 @@ NativeObjectExtent getNativeObjectExtent(
 		{
 			// Type recovery may represent the first element of a PE array as a
 			// scalar global.  Pointer arithmetic is proof that the escape is an
-			// object base; the next configured global is its conservative bound.
+			// object base; the next configured object or function is its
+			// conservative bound.
 			auto address = config->getGlobalAddress(global);
 			if (address.isDefined() && address.getValue() <= UINT32_MAX)
 			{
@@ -285,6 +286,16 @@ NativeObjectExtent getNativeObjectExtent(
 				for (GlobalVariable& candidate : module->globals())
 				{
 					auto candidateAddress = config->getGlobalAddress(&candidate);
+					if (candidateAddress.isDefined()
+							&& candidateAddress.getValue() > address.getValue()
+							&& candidateAddress.getValue() < nextAddress)
+					{
+						nextAddress = candidateAddress.getValue();
+					}
+				}
+				for (Function& candidate : *module)
+				{
+					auto candidateAddress = config->getFunctionAddress(&candidate);
 					if (candidateAddress.isDefined()
 							&& candidateAddress.getValue() > address.getValue()
 							&& candidateAddress.getValue() < nextAddress)

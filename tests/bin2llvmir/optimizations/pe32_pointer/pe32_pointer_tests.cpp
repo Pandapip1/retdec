@@ -431,6 +431,48 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgeBoundsIndexedExternalConstantAtFollowingFunction)
+{
+	parseInput(R"(
+		@lookup = external constant i8*
+		@distant.object = global i8 0
+		define i8 @use.lookup(i32 %index) {
+			%base = ptrtoint i8** @lookup to i32
+			%address = add i32 %base, %index
+			%pointer = inttoptr i32 %address to i8*
+			%value = load i8, i8* %pointer, align 1
+			ret i8 %value
+		}
+		define void @following.function() {
+			ret void
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "lookup", 0x5133a8f3);
+	addGlobalAddress(config, "distant.object", 0x51361ab0);
+	addFunctionRange(config, "following.function", 0x5133a905, 0x5133a920);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	CallInst* encode = nullptr;
+	for (Instruction& instruction : instructions(*module->getFunction("use.lookup")))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() != nullptr
+				&& call->getCalledFunction()->getName()
+						== "__retdec_pe32_host_to_guest")
+		{
+			encode = call;
+		}
+	}
+	ASSERT_NE(nullptr, encode);
+	EXPECT_EQ(module->getGlobalVariable("lookup"),
+			encode->getArgOperand(1)->stripPointerCasts());
+	auto* extent = cast<ConstantInt>(encode->getArgOperand(2));
+	EXPECT_EQ(18u, extent->getZExtValue());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		bridgePipelineIsOptInAndNormalizedAfterPointerCellLegalization)
 {
 	std::vector<std::string> passes{
