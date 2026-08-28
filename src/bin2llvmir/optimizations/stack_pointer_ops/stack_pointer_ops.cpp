@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <llvm/Analysis/CaptureTracking.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
@@ -606,10 +607,215 @@ bool StackPointerOpsRemove::runOnModuleCustom(llvm::Module& m, Abi* a)
 bool StackPointerOpsRemove::run()
 {
 	bool changed = false;
+	changed |= removeReconstructedStackProbes();
 	changed |= removeStackPointerStores();
 	changed |= removeDeadRegisterRestorePops();
 	changed |= removePreservationStores();
 
+	return changed;
+}
+
+namespace {
+
+bool isDecodedStackProbe(Function* function, Abi* abi)
+{
+	if (function == nullptr || function->isDeclaration()
+			|| !function->arg_empty() || abi == nullptr || !abi->isX86())
+	{
+		return false;
+	}
+	auto* eax = abi->getRegister(X86_REG_EAX, abi->isX86());
+	if (eax == nullptr)
+	{
+		return false;
+	}
+
+	bool readsSize = false;
+	bool comparesPage = false;
+	bool stepsPage = false;
+	bool probesMemory = false;
+	for (Instruction& instruction : instructions(function))
+	{
+		if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			readsSize |= load->getPointerOperand() == eax;
+			Value* pointer = load->getPointerOperand();
+			while (auto* cast = dyn_cast<BitCastInst>(pointer))
+			{
+				pointer = cast->getOperand(0);
+			}
+			probesMemory |= isa<IntToPtrInst>(pointer);
+		}
+		if (auto* compare = dyn_cast<ICmpInst>(&instruction))
+		{
+			for (Value* operand : compare->operands())
+			{
+				auto* constant = dyn_cast<ConstantInt>(operand);
+				comparesPage |= constant != nullptr
+						&& constant->getZExtValue() == 4096;
+			}
+		}
+		if (auto* binary = dyn_cast<BinaryOperator>(&instruction))
+		{
+			for (Value* operand : binary->operands())
+			{
+				auto* constant = dyn_cast<ConstantInt>(operand);
+				stepsPage |= constant != nullptr
+						&& (constant->getSExtValue() == 4096
+								|| constant->getSExtValue() == -4096);
+			}
+		}
+	}
+	return readsSize && comparesPage && stepsPage && probesMemory;
+}
+
+bool probeOutputsAreDeadAfterCall(CallInst* call, Abi* abi)
+{
+	auto* eax = abi->getRegister(X86_REG_EAX, abi->isX86());
+	auto* stackPointer = abi->getStackPointerRegister();
+	struct State
+	{
+		BasicBlock* block;
+		Instruction* first;
+		bool eaxOverwritten;
+		bool stackPointerOverwritten;
+	};
+	std::vector<State> pending{{
+			call->getParent(), call->getNextNode(), false, false}};
+	std::set<std::pair<BasicBlock*, unsigned>> visited;
+	while (!pending.empty())
+	{
+		State state = pending.back();
+		pending.pop_back();
+		bool eaxOverwritten = state.eaxOverwritten;
+		bool stackPointerOverwritten = state.stackPointerOverwritten;
+		for (Instruction* instruction = state.first;
+				instruction != nullptr; instruction = instruction->getNextNode())
+		{
+			if (auto* load = dyn_cast<LoadInst>(instruction))
+			{
+				if ((!stackPointerOverwritten
+							&& load->getPointerOperand() == stackPointer)
+						|| (!eaxOverwritten && load->getPointerOperand() == eax))
+				{
+					return false;
+				}
+			}
+			if (auto* store = dyn_cast<StoreInst>(instruction))
+			{
+				if (store->getPointerOperand() == eax)
+				{
+					eaxOverwritten = true;
+				}
+				if (store->getPointerOperand() == stackPointer)
+				{
+					stackPointerOverwritten = true;
+				}
+			}
+			if (isa<CallInst>(instruction) && !eaxOverwritten)
+			{
+				return false;
+			}
+		}
+
+		auto* terminator = state.block->getTerminator();
+		if (terminator->getNumSuccessors() == 0 && !eaxOverwritten)
+		{
+			return false;
+		}
+		for (BasicBlock* successor : successors(state.block))
+		{
+			unsigned liveState = unsigned(eaxOverwritten)
+					| (unsigned(stackPointerOverwritten) << 1);
+			auto key = std::make_pair(successor, liveState);
+			if (visited.insert(key).second)
+			{
+				pending.push_back({
+						successor,
+						&successor->front(),
+						eaxOverwritten,
+						stackPointerOverwritten});
+			}
+		}
+	}
+	return true;
+}
+
+} // anonymous namespace
+
+/**
+ * Remove a decoded MSVC stack-allocation probe once StackFrameCoalescing has
+ * already materialized the caller's complete native frame.  Re-executing the
+ * helper would probe and move the synthetic guest ESP outside that owned
+ * alloca; the native compiler's alloca is the replacement for that effect.
+ */
+bool StackPointerOpsRemove::removeReconstructedStackProbes()
+{
+	if (_abi == nullptr || !_abi->isX86())
+	{
+		return false;
+	}
+	bool changed = false;
+	std::vector<CallInst*> removable;
+	for (Function& function : *_module)
+	{
+		if (function.empty())
+		{
+			continue;
+		}
+		AllocaInst* frame = nullptr;
+		for (Instruction& instruction : function.getEntryBlock())
+		{
+			auto* alloca = dyn_cast<AllocaInst>(&instruction);
+			if (alloca != nullptr && alloca->getName() == "stack_frame")
+			{
+				frame = alloca;
+				break;
+			}
+		}
+		if (frame == nullptr || !frame->getAllocatedType()->isSized())
+		{
+			continue;
+		}
+		auto frameStart = getStackAllocaOffset(frame, _abi->getConfig());
+		if (!frameStart || *frameStart >= 0)
+		{
+			continue;
+		}
+		const uint64_t frameSize = _module->getDataLayout().getTypeAllocSize(
+				frame->getAllocatedType());
+		for (Instruction& instruction : instructions(function))
+		{
+			auto* call = dyn_cast<CallInst>(&instruction);
+			if (call == nullptr || !call->use_empty()
+					|| !isDecodedStackProbe(call->getCalledFunction(), _abi)
+					|| !probeOutputsAreDeadAfterCall(call, _abi))
+			{
+				continue;
+			}
+			auto* sizeStore = dyn_cast_or_null<StoreInst>(call->getPrevNode());
+			auto* size = sizeStore == nullptr
+					? nullptr
+					: dyn_cast<ConstantInt>(sizeStore->getValueOperand());
+			if (sizeStore == nullptr || size == nullptr
+					|| !_abi->isRegister(
+							sizeStore->getPointerOperand(), X86_REG_EAX)
+					|| size->getZExtValue() < 4096
+					|| size->getZExtValue() > frameSize
+					|| size->getZExtValue()
+							!= uint64_t(-*frameStart) - _abi->getWordSize()
+					|| frameSize - size->getZExtValue() > 2 * _abi->getWordSize())
+			{
+				continue;
+			}
+			removable.push_back(call);
+		}
+	}
+	for (auto* call : removable)
+	{
+		call->eraseFromParent();
+		changed = true;
+	}
 	return changed;
 }
 
