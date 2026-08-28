@@ -4598,7 +4598,13 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFadd(cs_insn* i, cs_x86* xi, ll
 	EXPECT_IS_EXPR(i, xi, irb, (xi->op_count <= 2));
 
 	std::tie(op0, op1, top, idx) = loadOpFloatingBinaryTop(i, xi, irb);
-	bool isFADDP = xi->opcode[0] == 0xDE && xi->opcode[1] == 0x00&& xi->opcode[2] == 0x00 && xi->opcode[3] == 0x00;
+	// This Capstone version reports FADDP as FADD.  The DE opcode alone is not
+	// sufficient because it also identifies the non-popping FIADD m16 form.
+	const bool isFADDP = i->id == X86_INS_FADD
+			&& xi->opcode[0] == 0xDE
+			&& xi->opcode[1] == 0x00
+			&& xi->opcode[2] == 0x00
+			&& xi->opcode[3] == 0x00;
 
 	auto* fadd = irb.CreateFAdd(op0, op1);
 
@@ -4611,7 +4617,7 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFadd(cs_insn* i, cs_x86* xi, ll
 		storeX87DataReg(irb, top, fadd);
 	}
 
-	if (i->id == X86_INS_FADD)
+	if (isFADDP)
 	{
 		x87IncTop(irb, top);
 	}
