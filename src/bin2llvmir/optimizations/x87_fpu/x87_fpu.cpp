@@ -115,15 +115,39 @@ bool X87FpuAnalysis::runOnModuleCustom(
 std::list<FunctionAnalyzeMetadata> getFunctions2Analyze(llvm::GlobalVariable* top)
 {
 	std::list<Function*> functions;
+	std::set<Function*> seenFunctions;
 	for (Value::use_iterator k = top->use_begin(); k != top->use_end(); ++k)
 	{
 		if (Instruction *ins= dyn_cast<Instruction>(k->getUser()))
 		{
-			functions.push_back(ins->getParent()->getParent());
+			auto* function = ins->getParent()->getParent();
+			if (seenFunctions.insert(function).second)
+			{
+				functions.push_back(function);
+			}
+		}
+	}
+	// A caller that only invokes an x87 helper still carries the helper's TOP
+	// effect even if it never reads TOP directly.  Include transitive direct
+	// callers so call-site entry contexts can be solved rather than silently
+	// treating every helper call as net-zero.
+	for (auto it = functions.begin(); it != functions.end(); ++it)
+	{
+		for (User* user : (*it)->users())
+		{
+			auto* call = dyn_cast<CallInst>(user);
+			if (call == nullptr || call->getCalledFunction() != *it)
+			{
+				continue;
+			}
+			auto* caller = call->getFunction();
+			if (!caller->isDeclaration() && seenFunctions.insert(caller).second)
+			{
+				functions.push_back(caller);
+			}
 		}
 	}
 	functions.sort();
-	functions.unique();
 
 	std::list<FunctionAnalyzeMetadata> functionsMetadata;
 	for (auto &f : functions)
@@ -224,64 +248,147 @@ bool X87FpuAnalysis::run()
 	}
 
 	auto analyzedFunctionsMetadata = getFunctions2Analyze(top);
-
-	for (auto& funMd: analyzedFunctionsMetadata)
+	// An address-taken helper may be entered indirectly at any TOP.  Keep it
+	// runtime-indexed; direct calls are handled more precisely by the fixed
+	// point below (including callers pulled into the transitive closure).
+	for (auto& funMd : analyzedFunctionsMetadata)
 	{
-		funMd.initSystem();
-		BasicBlock& enterBlock = funMd.function.begin().operator*();
-		funMd.addEquation({{enterBlock, 1, funMd.inIndex}}, EMPTY_FPU_STACK);
-
-		for (Function::iterator bbIt=funMd.function.begin(),
-			bbEndIt = funMd.function.end(); bbIt != bbEndIt; ++bbIt)
+		for (User* user : funMd.function.users())
 		{
-			BasicBlock* bb = bbIt.operator->();
-			int relativeOutBbTop = 0;
-
-			if (!analyzeBasicBlock(analyzedFunctionsMetadata, funMd, bb, relativeOutBbTop))
+			auto* call = dyn_cast<CallInst>(user);
+			if (call == nullptr || call->getCalledFunction() != &funMd.function)
 			{
-				funMd.analyzeSuccess = false;
-			}
-
-			funMd.addEquation({{*bb, -1, funMd.inIndex},{*bb, 1, funMd.outIndex}}, relativeOutBbTop);
-
-			//if (_config->getConfig().architecture.isX86_16() || _config->getConfig().architecture.isX86_64()
-			//	&& std::find(funMd.terminatingBasicBlocks.begin(), funMd.terminatingBasicBlocks.end(), bb) != funMd.terminatingBasicBlocks.end())
-			//{
-			//	funMd.addEquation({{*bb, 1, funMd.outIndex}}, EMPTY_FPU_STACK);
-			//}
-
-			for (auto it = pred_begin(bb), et=pred_end(bb); it != et; ++it)
-			{
-				BasicBlock *pred = it.operator*();
-				funMd.addEquation({{*bb, 1, funMd.inIndex},{*pred, -1, funMd.outIndex}}, 0);
-			}
-		}
-
-		if (funMd.A.rows() <= PERFORMANCE_CEIL)
-		{
-			const auto& pivHouseholderQr = funMd.A.colPivHouseholderQr();
-			int matRank = pivHouseholderQr.rank();
-			int augmentedMatRank = augmentedRank(funMd.A, funMd.B);
-
-			if (matRank == augmentedMatRank) // there is exactly one solution
-			{
-				funMd.x = pivHouseholderQr.solve(funMd.B);
-			}
-			else
-			{
-				funMd.analyzeSuccess = false;
-			}
-		}
-		else // worst scenario => due to performance ceil turn to simple no CFG analyse
-		{
-			int height = funMd.A.rows();
-			funMd.x.resize(height, 1);
-			for (int i = 0; i < height; ++i)
-			{
-				funMd.x(i, 0) = EMPTY_FPU_STACK;
+				_runtimeEntryStackFunctions.insert(&funMd.function);
+				break;
 			}
 		}
 	}
+	auto analyzeFunctions = [&]()
+	{
+		for (auto& funMd: analyzedFunctionsMetadata)
+		{
+			funMd.analyzeSuccess = true;
+			funMd.numberOfEquations = 0;
+			funMd.pseudoCalls.clear();
+			funMd.topVals.clear();
+			funMd.callTopVals.clear();
+			funMd.initSystem();
+			BasicBlock& enterBlock = funMd.function.begin().operator*();
+			funMd.addEquation({{enterBlock, 1, funMd.inIndex}}, EMPTY_FPU_STACK);
+
+			for (Function::iterator bbIt=funMd.function.begin(),
+				bbEndIt = funMd.function.end(); bbIt != bbEndIt; ++bbIt)
+			{
+				BasicBlock* bb = bbIt.operator->();
+				int relativeOutBbTop = 0;
+
+				if (!analyzeBasicBlock(analyzedFunctionsMetadata, funMd, bb, relativeOutBbTop))
+				{
+					funMd.analyzeSuccess = false;
+				}
+
+				funMd.addEquation({{*bb, -1, funMd.inIndex},{*bb, 1, funMd.outIndex}}, relativeOutBbTop);
+
+				for (auto it = pred_begin(bb), et=pred_end(bb); it != et; ++it)
+				{
+					BasicBlock *pred = it.operator*();
+					funMd.addEquation({{*bb, 1, funMd.inIndex},{*pred, -1, funMd.outIndex}}, 0);
+				}
+			}
+
+			if (funMd.A.rows() <= PERFORMANCE_CEIL)
+			{
+				const auto& pivHouseholderQr = funMd.A.colPivHouseholderQr();
+				int matRank = pivHouseholderQr.rank();
+				int augmentedMatRank = augmentedRank(funMd.A, funMd.B);
+
+				if (matRank == augmentedMatRank) // there is exactly one solution
+				{
+					funMd.x = pivHouseholderQr.solve(funMd.B);
+				}
+				else
+				{
+					funMd.analyzeSuccess = false;
+				}
+			}
+			else // worst scenario => due to performance ceil turn to simple no CFG analyse
+			{
+				int height = funMd.A.rows();
+				funMd.x.resize(height, 1);
+				for (int i = 0; i < height; ++i)
+				{
+					funMd.x(i, 0) = EMPTY_FPU_STACK;
+				}
+			}
+		}
+	};
+
+	// First solve local TOP changes, then propagate the inferred net stack
+	// effect through defined calls.  expectedTop previously stayed at its
+	// default zero unless a caller happened to load ST0 after the call, so two
+	// calls to a pushing helper were both analyzed as empty-stack entries.
+	bool effectsConverged = false;
+	for (std::size_t iteration = 0;
+			iteration <= analyzedFunctionsMetadata.size(); ++iteration)
+	{
+		analyzeFunctions();
+		bool changed = false;
+		for (auto& funMd : analyzedFunctionsMetadata)
+		{
+			if (!funMd.analyzeSuccess || funMd.terminatingBasicBlocks.empty())
+			{
+				continue;
+			}
+			int exitTop = static_cast<int>(round(funMd.x(
+					funMd.indexes[funMd.terminatingBasicBlocks.front()]
+							[funMd.outIndex], 0)));
+			bool consistent = true;
+			for (BasicBlock* exit : funMd.terminatingBasicBlocks)
+			{
+				consistent &= exitTop == static_cast<int>(round(funMd.x(
+						funMd.indexes[exit][funMd.outIndex], 0)));
+			}
+			if (!consistent)
+			{
+				funMd.expectedTopAnalyzed = false;
+				_runtimeEntryStackFunctions.insert(&funMd.function);
+				for (User* user : funMd.function.users())
+				{
+					if (auto* call = dyn_cast<CallInst>(user))
+					{
+						_runtimeEntryStackFunctions.insert(call->getFunction());
+					}
+				}
+				continue;
+			}
+			int effect = exitTop - EMPTY_FPU_STACK;
+			if (!funMd.expectedTopAnalyzed || funMd.expectedTop != effect)
+			{
+				funMd.expectedTop = effect;
+				funMd.expectedTopAnalyzed = true;
+				changed = true;
+			}
+		}
+		if (!changed)
+		{
+			effectsConverged = true;
+			break;
+		}
+	}
+	if (!effectsConverged)
+	{
+		// Recursive stack-changing call graphs may have no finite net effect.
+		// Do not retain a bounded-iteration guess for them; runtime-index every
+		// affected stack access instead.
+		for (auto& funMd : analyzedFunctionsMetadata)
+		{
+			funMd.expectedTopAnalyzed = false;
+			_runtimeEntryStackFunctions.insert(&funMd.function);
+		}
+	}
+	// Ensure pseudo-call metadata and call-site TOPs correspond to the final
+	// propagated effects rather than the preceding fixed-point iteration.
+	analyzeFunctions();
 
 	return optimizeAnalyzedFpuInstruction(analyzedFunctionsMetadata);
 }

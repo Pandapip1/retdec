@@ -1916,6 +1916,45 @@ TEST_F(X87FpuAnalysisTests,
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(X87FpuAnalysisTests,
+		usesRuntimeTopForTwoSequentialCallsToPushingCallee)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define i3 @foo(x86_fp80 %first, x86_fp80 %second) {
+		entry:
+			%first.result = call i32 @boo(x86_fp80 %first)
+			%second.result = call i32 @boo(x86_fp80 %second)
+			%top.after = load i3, i3* @fpu_stat_TOP
+			ret i3 %top.after
+		}
+		define i32 @boo(x86_fp80 %value) {
+		entry:
+			%top.before = load i3, i3* @fpu_stat_TOP
+			%pushed = sub i3 %top.before, 1
+			store i3 %pushed, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed, x86_fp80 %value)
+			ret i32 0
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	auto* callee = getFunctionByName("boo");
+	auto* runtimeIndex = getValueByName("pushed");
+	unsigned runtimeSelections = 0;
+	for (auto& instruction : instructions(callee))
+	{
+		auto* compare = dyn_cast<ICmpInst>(&instruction);
+		if (compare != nullptr)
+		{
+			runtimeSelections += compare->getOperand(0) == runtimeIndex;
+		}
+	}
+	EXPECT_EQ(8u, runtimeSelections);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(X87FpuAnalysisTests, handlesIndirectCallBeforeX87Load)
 {
 	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
