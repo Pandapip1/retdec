@@ -147,6 +147,49 @@ TEST(Pe32RuntimeTests, StackRetirementRejectsUnknownAndFixedMappings)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
 }
 
+TEST(Pe32RuntimeTests, ScalesTranslationsAcrossManyRetiredStackMappings)
+{
+	constexpr size_t regionCount = 8192;
+	constexpr size_t pointerOffset = 5;
+	std::vector<std::array<uint8_t, 16>> stackFrames(regionCount);
+	std::vector<uint32_t> guestPointers(regionCount);
+	std::vector<uint8_t*> retiredPointers(regionCount);
+
+	for (size_t i = 0; i < regionCount; ++i)
+	{
+		auto& frame = stackFrames[i];
+		frame[pointerOffset] = static_cast<uint8_t>(i);
+		guestPointers[i] = __retdec_pe32_host_to_guest(
+				frame.data() + pointerOffset, frame.data(), frame.size());
+		ASSERT_NE(0u, guestPointers[i]) << "region " << i;
+		ASSERT_EQ(1, retdec_pe32_retire_stack_object(frame.data()))
+				<< "region " << i;
+		retiredPointers[i] = static_cast<uint8_t*>(
+				__retdec_pe32_guest_to_host(guestPointers[i]));
+		ASSERT_NE(nullptr, retiredPointers[i]) << "region " << i;
+	}
+
+	// Exercise both ordered indices in reverse insertion order.  This models
+	// long-running lifted code whose escaped stack tokens remain live after the
+	// native frames have returned and their host addresses have been reused.
+	for (size_t i = regionCount; i-- > 0;)
+	{
+		EXPECT_EQ(static_cast<uint8_t>(i), *retiredPointers[i]);
+		EXPECT_EQ(retiredPointers[i] + (stackFrames[i].size() - pointerOffset - 1),
+				__retdec_pe32_guest_to_host(
+						guestPointers[i]
+								+ stackFrames[i].size() - pointerOffset - 1));
+		EXPECT_EQ(guestPointers[i], __retdec_pe32_host_to_guest(
+				retiredPointers[i], retiredPointers[i] - pointerOffset,
+				stackFrames[i].size()));
+	}
+
+	for (auto* pointer : retiredPointers)
+	{
+		EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(pointer));
+	}
+}
+
 TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)
 {
 	std::array<uint8_t, 8> first{};
