@@ -1043,7 +1043,10 @@ bool Pe32PointerBridge::run()
 	std::set<Function*> functionsNeedingMappings = relocationTargetFunctions;
 	for (Function& function : *_module)
 	{
-		if (!function.isDeclaration() && function.hasAddressTaken())
+		if (!function.isDeclaration()
+				&& (function.hasAddressTaken()
+						|| function.hasFnAttribute(
+								"retdec.pe32.relocated-entry")))
 		{
 			functionsNeedingMappings.insert(&function);
 		}

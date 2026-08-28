@@ -652,6 +652,14 @@ bool ValueProtect::unprotect()
 	for (auto& p : _type2fnc)
 	{
 		auto* fnc = p.second;
+		// LLVM cleanup between the paired protect/unprotect runs may detach an
+		// unused declaration from the module.  The static type map deliberately
+		// survives those intervening passes, so do not try to erase a helper a
+		// second time when it has already been removed.
+		if (fnc == nullptr || fnc->getParent() != _module)
+		{
+			continue;
+		}
 
 		for (auto uIt = fnc->user_begin(); uIt != fnc->user_end();)
 		{

@@ -99,6 +99,28 @@ llvm::CallInst* Decoder::transformToIndirectCall(
 	return c;
 }
 
+llvm::CallInst* Decoder::transformToIndirectTailCall(
+		llvm::CallInst* pseudo,
+		llvm::Value* callee)
+{
+	auto* call = transformToIndirectCall(pseudo, callee);
+	auto* terminator = pseudo->getParent()->getTerminator();
+	auto* returnType = pseudo->getFunction()->getReturnType();
+	if (returnType->isVoidTy())
+	{
+		ReturnInst::Create(_module->getContext(), terminator);
+	}
+	else
+	{
+		ReturnInst::Create(
+				_module->getContext(),
+				UndefValue::get(returnType),
+				terminator);
+	}
+	terminator->eraseFromParent();
+	return call;
+}
+
 llvm::CallInst* Decoder::transformToCondCall(
 		llvm::CallInst* pseudo,
 		llvm::Value* cond,

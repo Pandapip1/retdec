@@ -617,8 +617,10 @@ bool Decoder::getJumpTargetsFromInstruction(
 	//
 	else if (_c2l->isBranchFunctionCall(pCall))
 	{
-		if (auto t = getJumpTarget(addr, pCall, pCall->getArgOperand(0)))
+		auto target = getJumpTarget(addr, pCall, pCall->getArgOperand(0));
+		if (target)
 		{
+			auto t = target;
 			//.text:08001EE1    call    near ptr loc_8001EE1+1
 			//.text:08001EE6    cmp     ebx, esi
 			if (addr < t && t < nextAddr)
@@ -699,6 +701,15 @@ bool Decoder::getJumpTargetsFromInstruction(
 		}
 		else
 		{
+			if (!target)
+			{
+				// A computed JMP is an observable tail transfer even when its
+				// target cannot be solved statically. Preserve it as an indirect
+				// call that returns from the current decoded function. Previously
+				// finalizePseudoCalls() erased the unresolved branch pseudo and
+				// silently turned runtime dispatch helpers into no-ops.
+				transformToIndirectTailCall(pCall, pCall->getArgOperand(0));
+			}
 			return true;
 		}
 	}

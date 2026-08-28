@@ -36,6 +36,52 @@ TEST_F(ValueProtectTests, noOptimizationReturnsFalse)
 	EXPECT_FALSE(ret);
 }
 
+TEST_F(ValueProtectTests, unprotectIgnoresHelperDetachedByInterveningPass)
+{
+	parseInput(R"(
+		define void @first() {
+			%slot = alloca i32
+			ret void
+		}
+		define void @second() {
+			%slot = alloca i64
+			ret void
+		}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().architecture.setIsX86();
+	AbiX86 abi(module.get(), &c);
+
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, &c, &abi));
+	std::vector<Function*> helpers;
+	for (Function& function : *module)
+	{
+		if (function.isDeclaration()
+				&& function.getName().startswith(
+						"__decompiler_undefined_function_"))
+		{
+			helpers.push_back(&function);
+		}
+	}
+	ASSERT_EQ(2u, helpers.size());
+	auto* detached = *std::max_element(
+			helpers.begin(), helpers.end(), [](Function* left, Function* right)
+			{
+				return left->getReturnType() < right->getReturnType();
+			});
+	for (auto user = detached->user_begin(); user != detached->user_end();)
+	{
+		auto* instruction = cast<Instruction>(*user++);
+		instruction->replaceAllUsesWith(
+				UndefValue::get(instruction->getType()));
+		instruction->eraseFromParent();
+	}
+	detached->removeFromParent();
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &c, &abi));
+	module->getFunctionList().push_back(detached);
+}
+
 //
 // read nullptr
 //

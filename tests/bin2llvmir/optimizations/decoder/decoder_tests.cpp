@@ -30,6 +30,20 @@ class DecoderTests: public LlvmIrTests
 			return decoder.transformToIndirectCall(pseudo, target);
 		}
 
+		CallInst* transformToIndirectTailCall(
+				Decoder& decoder,
+				Config& config,
+				CallInst* pseudo,
+				Value* target)
+		{
+			decoder._module = module.get();
+			decoder._config = &config;
+			decoder._abi = AbiProvider::addAbi(module.get(), &config);
+			decoder._abi->addRegister(
+					X86_REG_EAX, module->getGlobalVariable("eax"));
+			return decoder.transformToIndirectTailCall(pseudo, target);
+		}
+
 		void inlineSharedTailBranches(
 				Decoder& decoder,
 				const std::vector<std::pair<CallInst*, StoreInst*>>& calls)
@@ -90,6 +104,44 @@ TEST_F(DecoderTests, unresolvedComputedCallIsPreservedAsIndirectCall)
 	EXPECT_EQ(indirect, resultStore->getValueOperand());
 	EXPECT_EQ(module->getGlobalVariable("eax"),
 			resultStore->getPointerOperand());
+}
+
+TEST_F(DecoderTests, unresolvedComputedBranchIsPreservedAsIndirectTailCall)
+{
+	parseInput(R"(
+		@eax = global i32 0
+
+		declare void @__pseudo_branch(i32)
+
+		define i32 @dispatcher(i32 %target) {
+		entry:
+		  call void @__pseudo_branch(i32 %target)
+		  unreachable
+		}
+	)");
+	auto configJson = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		}
+	})");
+	auto config = Config::fromConfig(module.get(), configJson);
+
+	auto* dispatcher = module->getFunction("dispatcher");
+	auto* pseudo = dyn_cast<CallInst>(&dispatcher->getEntryBlock().front());
+	ASSERT_NE(nullptr, pseudo);
+	Value* target = &*dispatcher->arg_begin();
+
+	Decoder decoder;
+	auto* indirect = transformToIndirectTailCall(
+			decoder, config, pseudo, target);
+	ASSERT_NE(nullptr, indirect);
+	EXPECT_EQ(nullptr, indirect->getCalledFunction());
+	EXPECT_TRUE(isa<ReturnInst>(dispatcher->getEntryBlock().getTerminator()));
+	EXPECT_FALSE(isa<UnreachableInst>(
+			dispatcher->getEntryBlock().getTerminator()));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
 TEST_F(DecoderTests, branchesFromMultipleEntriesInlineSharedTailState)

@@ -248,19 +248,47 @@ bool X87FpuAnalysis::run()
 	}
 
 	auto analyzedFunctionsMetadata = getFunctions2Analyze(top);
-	// An address-taken helper may be entered indirectly at any TOP.  Keep it
-	// runtime-indexed; direct calls are handled more precisely by the fixed
-	// point below (including callers pulled into the transitive closure).
+	// Address-taken helpers, helpers with multiple call sites, and helpers called
+	// from a CFG cycle may be entered at more than one architectural TOP.  Keep
+	// those runtime-indexed.  A sole acyclic direct call can still use the
+	// compact entry TOP inferred by the interprocedural fixed point below.
 	for (auto& funMd : analyzedFunctionsMetadata)
 	{
+		bool dynamicEntry = funMd.function.hasFnAttribute(
+				"retdec.pe32.relocated-entry");
+		unsigned directCalls = 0;
 		for (User* user : funMd.function.users())
 		{
 			auto* call = dyn_cast<CallInst>(user);
 			if (call == nullptr || call->getCalledFunction() != &funMd.function)
 			{
-				_runtimeEntryStackFunctions.insert(&funMd.function);
-				break;
+				dynamicEntry = true;
+				continue;
 			}
+			++directCalls;
+
+			BasicBlock* callBlock = call->getParent();
+			std::set<BasicBlock*> visited;
+			SmallVector<BasicBlock*, 8> worklist;
+			worklist.append(succ_begin(callBlock), succ_end(callBlock));
+			while (!worklist.empty() && !dynamicEntry)
+			{
+				BasicBlock* block = worklist.pop_back_val();
+				if (block == callBlock)
+				{
+					dynamicEntry = true;
+					break;
+				}
+				if (!visited.insert(block).second)
+				{
+					continue;
+				}
+				worklist.append(succ_begin(block), succ_end(block));
+			}
+		}
+		if (dynamicEntry || directCalls > 1)
+		{
+			_runtimeEntryStackFunctions.insert(&funMd.function);
 		}
 	}
 	auto analyzeFunctions = [&]()
@@ -751,6 +779,34 @@ bool X87FpuAnalysis::optimizeAnalyzedFpuInstruction(
 				// callee observes.
 				_runtimeEntryStackFunctions.insert(&funMd.function);
 				_runtimeEntryStackFunctions.insert(calledFunction);
+			}
+		}
+	}
+
+	// A runtime-indexed entry passes its unknown physical TOP origin through
+	// every defined x87 callee, even when an individual call has zero relative
+	// stack depth.  Close this relation transitively after the live-stack scan
+	// above has added its own runtime entries.
+	bool runtimeClosureChanged = true;
+	while (runtimeClosureChanged)
+	{
+		runtimeClosureChanged = false;
+		for (auto& funMd : analyzedFunctionsMetadata)
+		{
+			if (_runtimeEntryStackFunctions.count(&funMd.function) == 0)
+			{
+				continue;
+			}
+			for (const auto& callTop : funMd.callTopVals)
+			{
+				auto* calledFunction = callTop.first->getCalledFunction();
+				if (calledFunction != nullptr
+						&& getFunMd(analyzedFunctionsMetadata, calledFunction)
+								!= analyzedFunctionsMetadata.end())
+				{
+					runtimeClosureChanged |= _runtimeEntryStackFunctions.insert(
+							calledFunction).second;
+				}
 			}
 		}
 	}

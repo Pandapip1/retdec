@@ -8,6 +8,7 @@
 #include "retdec/utils/string.h"
 
 #include "retdec/loader/loader/elf/elf_image.h"
+#include "retdec/fileformat/file_format/pe/pe_format.h"
 
 using namespace llvm;
 using namespace retdec::capstone2llvmir;
@@ -543,6 +544,7 @@ void Decoder::initAllowedRangesWithConfig()
 void Decoder::initJumpTargets()
 {
 	initJumpTargetsConfig();
+	initJumpTargetsPe32Relocations();
 	if (_config->getConfig().parameters.isDetectStaticCode())
 	{
 		initStaticCode();
@@ -554,6 +556,96 @@ void Decoder::initJumpTargets()
 	initJumpTargetsSymbols(); // MUST be before exports
 	initJumpTargetsExports();
 	initVtables();
+}
+
+/**
+ * A PE base relocation applied to a cell whose value points into executable
+ * code is an address-taken code entry. MSVC runtime dispatch tables commonly
+ * target small interior entry stubs which have neither symbols nor ordinary
+ * CALL users, so decode those entries before computed branches are resolved.
+ */
+void Decoder::initJumpTargetsPe32Relocations()
+{
+	if (!_config->getConfig().fileFormat.isPe()
+			|| !_config->getConfig().architecture.isX86()
+			|| _config->getConfig().architecture.getBitSize() != 32)
+	{
+		return;
+	}
+	auto* pe = dynamic_cast<PeFormat*>(_image->getFileFormat());
+	if (pe == nullptr)
+	{
+		return;
+	}
+
+	static constexpr uint64_t baseRelocationDirectory = 5;
+	static constexpr uint16_t highLowRelocation = 3;
+	uint64_t directory = 0;
+	uint64_t directorySize = 0;
+	if (!pe->getDataDirectoryAbsolute(
+			baseRelocationDirectory, directory, directorySize)
+			|| directorySize < 8 || directory > UINT64_MAX - directorySize)
+	{
+		return;
+	}
+
+	auto* image = _image->getImage();
+	const uint64_t imageBase = image->getBaseAddress();
+	const uint64_t end = directory + directorySize;
+	for (uint64_t cursor = directory; cursor <= end - 8; )
+	{
+		uint64_t pageRva = 0;
+		uint64_t blockSize = 0;
+		if (!image->getXByte(cursor, 4, pageRva)
+				|| !image->getXByte(cursor + 4, 4, blockSize)
+				|| blockSize < 8 || blockSize > end - cursor)
+		{
+			break;
+		}
+		for (uint64_t offset = 8; offset + 2 <= blockSize; offset += 2)
+		{
+			uint64_t raw = 0;
+			if (!image->getXByte(cursor + offset, 2, raw)
+					|| (raw >> 12) != highLowRelocation)
+			{
+				continue;
+			}
+			const uint64_t cell = imageBase + pageRva + (raw & 0xfff);
+			uint64_t target = 0;
+			if (!image->getXByte(cell, 4, target))
+			{
+				continue;
+			}
+			// Respect --select-decode-only.  Alternative ranges cover the whole
+			// executable image, and admitting every address-taken runtime helper
+			// from them changes function ownership far outside the requested
+			// closure.  Primary ranges are the code this Decoder invocation is
+			// actually authorized to materialize.
+			if (_ranges.getPrimary(target) == nullptr)
+			{
+				continue;
+			}
+			auto* segment = image->getSegmentFromAddress(target);
+			if (segment == nullptr || segment->getSecSeg() == nullptr
+					|| !segment->getSecSeg()->isCode())
+			{
+				continue;
+			}
+			if (auto* jumpTarget = _jumpTargets.push(
+					target,
+					JumpTarget::eType::VTABLE,
+					_c2l->getBasicMode(),
+					cell))
+			{
+				// Non-leftover targets are decoded only when they already own a
+				// function/basic block.  Relocation-only interior entries have
+				// neither, so merely queueing the address would be a no-op.
+				auto* function = createFunction(jumpTarget->getAddress());
+				function->addFnAttr("retdec.pe32.relocated-entry");
+			}
+		}
+		cursor += blockSize;
+	}
 }
 
 void Decoder::initJumpTargetsConfig()

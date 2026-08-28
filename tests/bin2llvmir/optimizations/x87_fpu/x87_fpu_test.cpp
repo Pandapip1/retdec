@@ -1955,6 +1955,118 @@ TEST_F(X87FpuAnalysisTests,
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(X87FpuAnalysisTests,
+		usesRuntimeTopForCallablePushingHelperWithOneCallSite)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define i3 @foo(x86_fp80 %value, i1 %repeat) {
+		entry:
+			br label %loop
+		loop:
+			%result = call i32 @boo(x86_fp80 %value)
+			br i1 %repeat, label %loop, label %exit
+		exit:
+			%top.after = load i3, i3* @fpu_stat_TOP
+			ret i3 %top.after
+		}
+		define i32 @boo(x86_fp80 %value) {
+		entry:
+			%top.before = load i3, i3* @fpu_stat_TOP
+			%pushed = sub i3 %top.before, 1
+			store i3 %pushed, i3* @fpu_stat_TOP
+			call void @__frontend_reg_store.fpr(i3 %pushed, x86_fp80 %value)
+			ret i32 0
+		}
+	)");
+
+	setX86Environment("32", "cdecl");
+	// A loop with a net push has no finite static TOP solution.  The pass may
+	// report analysis failure, but it must still lower every pseudo through the
+	// runtime-indexed fallback.
+	(void)pass.runOnModuleCustom(*module, config, abi);
+
+	auto* callee = getFunctionByName("boo");
+	auto* runtimeIndex = getValueByName("pushed");
+	unsigned runtimeSelections = 0;
+	for (auto& instruction : instructions(callee))
+	{
+		auto* compare = dyn_cast<ICmpInst>(&instruction);
+		if (compare != nullptr)
+		{
+			runtimeSelections += compare->getOperand(0) == runtimeIndex;
+		}
+	}
+	EXPECT_EQ(8u, runtimeSelections);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(X87FpuAnalysisTests,
+		usesRuntimeTopForPe32RelocatedEntry)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define x86_fp80 @relocated_entry() #0 {
+		entry:
+			%top = load i3, i3* @fpu_stat_TOP
+			%value = call x86_fp80 @__frontend_reg_load.fpr(i3 %top)
+			ret x86_fp80 %value
+		}
+		attributes #0 = { "retdec.pe32.relocated-entry" }
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	auto* function = getFunctionByName("relocated_entry");
+	auto* runtimeIndex = getValueByName("top");
+	unsigned runtimeSelections = 0;
+	for (auto& instruction : instructions(function))
+	{
+		auto* compare = dyn_cast<ICmpInst>(&instruction);
+		if (compare != nullptr)
+		{
+			runtimeSelections += compare->getOperand(0) == runtimeIndex;
+		}
+	}
+	EXPECT_EQ(7u, runtimeSelections);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(X87FpuAnalysisTests,
+		propagatesRuntimeTopFromPe32RelocatedEntryToCallee)
+{
+	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(
+		define x86_fp80 @relocated_entry() #0 {
+		entry:
+			%result = call x86_fp80 @helper()
+			ret x86_fp80 %result
+		}
+		define x86_fp80 @helper() {
+		entry:
+			%top = load i3, i3* @fpu_stat_TOP
+			%value = call x86_fp80 @__frontend_reg_load.fpr(i3 %top)
+			ret x86_fp80 %value
+		}
+		attributes #0 = { "retdec.pe32.relocated-entry" }
+	)");
+
+	setX86Environment("32", "cdecl");
+	ASSERT_TRUE(pass.runOnModuleCustom(*module, config, abi));
+
+	auto* function = getFunctionByName("helper");
+	auto* runtimeIndex = getValueByName("top");
+	unsigned runtimeSelections = 0;
+	for (auto& instruction : instructions(function))
+	{
+		auto* compare = dyn_cast<ICmpInst>(&instruction);
+		if (compare != nullptr)
+		{
+			runtimeSelections += compare->getOperand(0) == runtimeIndex;
+		}
+	}
+	EXPECT_EQ(7u, runtimeSelections);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(X87FpuAnalysisTests, handlesIndirectCallBeforeX87Load)
 {
 	parseInput(PREDEFINED_REGISTERS_AND_FUNCTIONS + R"(

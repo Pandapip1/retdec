@@ -81,6 +81,7 @@ class Decoder : public llvm::ModulePass
 		void initAllowedRangesWithConfig();
 		void initJumpTargets();
 		void initJumpTargetsConfig();
+		void initJumpTargetsPe32Relocations();
 		void initJumpTargetsEntryPoint();
 		void initJumpTargetsExterns();
 		void initJumpTargetsImports();
@@ -255,6 +256,9 @@ class Decoder : public llvm::ModulePass
 				llvm::Function* callee,
 				bool branchOrigin = false);
 		llvm::CallInst* transformToIndirectCall(
+				llvm::CallInst* pseudo,
+				llvm::Value* callee);
+		llvm::CallInst* transformToIndirectTailCall(
 				llvm::CallInst* pseudo,
 				llvm::Value* callee);
 		llvm::CallInst* transformToCondCall(

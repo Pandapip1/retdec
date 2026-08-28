@@ -175,6 +175,10 @@ void UnreachableFuncs::getFuncsThatCannotBeOptimized(
 
 	for (Function& func : *module)
 	{
+		if (func.hasFnAttribute("retdec.pe32.relocated-entry"))
+		{
+			funcsThatCannotBeOptimized.insert(&func);
+		}
 		if (func.isDeclaration())
 		{
 			funcsThatCannotBeOptimized.insert(&func);
