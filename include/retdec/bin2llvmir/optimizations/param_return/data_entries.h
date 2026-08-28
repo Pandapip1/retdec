@@ -145,8 +145,8 @@ class CallEntry : public CallableEntry
 		const std::vector<llvm::LoadInst*>& retLoads() const;
 		const std::set<llvm::StoreInst*>& directArgStores() const;
 		const std::set<llvm::StoreInst*>& provenStackArgStores() const;
-		const std::set<llvm::StoreInst*>& obsoleteStackArgStores() const;
-		const std::vector<llvm::StoreInst*>& obsoleteStackCleanupMarkers() const;
+		const std::vector<llvm::WeakTrackingVH>& obsoleteStackArgStores() const;
+		const std::vector<llvm::WeakTrackingVH>& obsoleteStackCleanupMarkers() const;
 		llvm::Value* getDirectArgument(const llvm::Value* value) const;
 		bool isDirectArgument(const llvm::Value* value) const;
 		bool preservesNativeStackOrder() const;
@@ -163,8 +163,8 @@ class CallEntry : public CallableEntry
 		std::set<llvm::StoreInst*> _directArgStores;
 		std::vector<std::pair<llvm::Value*, llvm::WeakTrackingVH>> _directArgOrigins;
 		std::set<llvm::StoreInst*> _provenStackArgStores;
-		std::set<llvm::StoreInst*> _obsoleteStackArgStores;
-		std::vector<llvm::StoreInst*> _obsoleteStackCleanupMarkers;
+		std::vector<llvm::WeakTrackingVH> _obsoleteStackArgStores;
+		std::vector<llvm::WeakTrackingVH> _obsoleteStackCleanupMarkers;
 		bool _preserveNativeStackOrder = false;
 };
 

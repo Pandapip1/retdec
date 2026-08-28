@@ -394,7 +394,11 @@ void CallEntry::addProvenStackArgStore(StoreInst* store)
 
 void CallEntry::addObsoleteStackArgStore(StoreInst* store)
 {
-	_obsoleteStackArgStores.insert(store);
+	if (std::find(_obsoleteStackArgStores.begin(),
+			_obsoleteStackArgStores.end(), store) == _obsoleteStackArgStores.end())
+	{
+		_obsoleteStackArgStores.emplace_back(store);
+	}
 }
 
 void CallEntry::addObsoleteStackCleanupMarker(StoreInst* marker)
@@ -469,12 +473,12 @@ const std::set<StoreInst*>& CallEntry::provenStackArgStores() const
 	return _provenStackArgStores;
 }
 
-const std::set<StoreInst*>& CallEntry::obsoleteStackArgStores() const
+const std::vector<WeakTrackingVH>& CallEntry::obsoleteStackArgStores() const
 {
 	return _obsoleteStackArgStores;
 }
 
-const std::vector<StoreInst*>& CallEntry::obsoleteStackCleanupMarkers() const
+const std::vector<WeakTrackingVH>& CallEntry::obsoleteStackCleanupMarkers() const
 {
 	return _obsoleteStackCleanupMarkers;
 }

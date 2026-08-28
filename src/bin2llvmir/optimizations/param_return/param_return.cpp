@@ -1311,16 +1311,20 @@ void ParamReturn::eraseRecoveredX86CallArtifacts(
 			continue;
 		}
 
-		for (auto* marker : entry.obsoleteStackCleanupMarkers())
+		for (const auto& markerHandle : entry.obsoleteStackCleanupMarkers())
 		{
+			auto* marker = dyn_cast_or_null<StoreInst>(
+					static_cast<Value*>(markerHandle));
 			if (marker != nullptr && marker->getParent() != nullptr)
 			{
 				AsmInstruction(marker).eraseInstructions();
 			}
 		}
 
-		for (auto* store : entry.obsoleteStackArgStores())
+		for (const auto& storeHandle : entry.obsoleteStackArgStores())
 		{
+			auto* store = dyn_cast_or_null<StoreInst>(
+					static_cast<Value*>(storeHandle));
 			if (store != nullptr && store->getParent() != nullptr)
 			{
 				store->eraseFromParent();

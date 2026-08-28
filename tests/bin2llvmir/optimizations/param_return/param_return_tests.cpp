@@ -534,6 +534,11 @@ TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
 	entry.addProvenStackArgStore(filteredStore);
 	entry.setArgStores({filteredStore, keptStore});
 	entry.setArgs({kept});
+	CallEntry overlappingEntry(call);
+	entry.addObsoleteStackArgStore(keptStore);
+	overlappingEntry.addObsoleteStackArgStore(keptStore);
+	entry.addObsoleteStackCleanupMarker(filteredStore);
+	overlappingEntry.addObsoleteStackCleanupMarker(filteredStore);
 	ASSERT_EQ(1u, entry.directArgStores().size());
 	ASSERT_EQ(1u, entry.provenStackArgStores().size());
 
@@ -544,9 +549,18 @@ TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
 	kept->replaceAllUsesWith(replacement);
 	cast<Instruction>(kept)->eraseFromParent();
 	keptStore->eraseFromParent();
+	filteredStore->eraseFromParent();
 
 	EXPECT_EQ(replacement, entry.getDirectArgument(kept));
 	EXPECT_TRUE(entry.isDirectArgument(kept));
+	EXPECT_EQ(nullptr,
+			static_cast<Value*>(entry.obsoleteStackArgStores().front()));
+	EXPECT_EQ(nullptr,
+			static_cast<Value*>(overlappingEntry.obsoleteStackArgStores().front()));
+	EXPECT_EQ(nullptr,
+			static_cast<Value*>(entry.obsoleteStackCleanupMarkers().front()));
+	EXPECT_EQ(nullptr,
+			static_cast<Value*>(overlappingEntry.obsoleteStackCleanupMarkers().front()));
 }
 
 TEST_F(ParamReturnTests, x86CallerCleanupPreservesHiddenTrailingStackSlot)
