@@ -533,6 +533,10 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	}
 	for (auto* store : provenStores)
 	{
+		// Decoded outgoing stack writes are erased after rebuilding the call.
+		// Use their stored values directly, including when stack analysis has
+		// already rewritten the native slots to configured stack variables.
+		ce->addDirectArgStore(store);
 		// Every proven native stack write in the caller-cleanup window becomes
 		// obsolete once the call is rebuilt with LLVM arguments.  Keep this
 		// independent of the filtered argument list: fixed-arity callees may
