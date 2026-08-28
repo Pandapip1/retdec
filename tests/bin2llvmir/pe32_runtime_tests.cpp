@@ -107,25 +107,44 @@ TEST(Pe32RuntimeTests, GrowsRepeatedKnownAllocationAroundContainedPointer)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
 }
 
-TEST(Pe32RuntimeTests, KeepsEscapedPointerAcrossOverlappingStackFrames)
+TEST(Pe32RuntimeTests, RetiresEscapedStackBeforeOverlappingAddressReuse)
 {
 	std::array<uint8_t, 256> stackStorage{};
+	stackStorage[44] = 0x5a;
 	const auto returnedFrameGuest = __retdec_pe32_host_to_guest(
 			stackStorage.data() + 44, stackStorage.data() + 32, 64);
 	ASSERT_NE(0u, returnedFrameGuest);
-
-	// A later, differently based frame on the same native stack extends the
-	// retained mapping without invalidating the escaped guest token.
-	const auto expandedFrameGuest = __retdec_pe32_host_to_guest(
-			stackStorage.data() + 12, stackStorage.data(), 128);
-	ASSERT_NE(0u, expandedFrameGuest);
-	EXPECT_EQ(returnedFrameGuest - 44, expandedFrameGuest - 12);
-	EXPECT_EQ(stackStorage.data() + 44,
+	ASSERT_EQ(1, retdec_pe32_retire_stack_object(stackStorage.data() + 32));
+	auto* retiredPointer = static_cast<uint8_t*>(
 			__retdec_pe32_guest_to_host(returnedFrameGuest));
+	ASSERT_NE(nullptr, retiredPointer);
+	EXPECT_NE(stackStorage.data() + 44, retiredPointer);
+	EXPECT_EQ(0x5a, *retiredPointer);
+
+	stackStorage[44] = 0xa5;
+	const auto reusedFrameGuest = __retdec_pe32_host_to_guest(
+			stackStorage.data() + 12, stackStorage.data(), 128);
+	ASSERT_NE(0u, reusedFrameGuest);
+	EXPECT_NE(returnedFrameGuest, reusedFrameGuest);
+	EXPECT_EQ(0x5a, *retiredPointer);
 	EXPECT_EQ(stackStorage.data() + 100,
-			__retdec_pe32_guest_to_host(expandedFrameGuest + 88));
+			__retdec_pe32_guest_to_host(reusedFrameGuest + 88));
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(stackStorage.data()));
-	EXPECT_EQ(nullptr, __retdec_pe32_guest_to_host(returnedFrameGuest));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_pointer(retiredPointer));
+}
+
+TEST(Pe32RuntimeTests, StackRetirementRejectsUnknownAndFixedMappings)
+{
+	std::array<uint8_t, 16> object{};
+	EXPECT_EQ(0, retdec_pe32_retire_stack_object(object.data()));
+
+	constexpr uint32_t guestAddress = 0x62000000u;
+	ASSERT_EQ(guestAddress,
+			retdec_pe32_register_host_object(
+					object.data(), object.size(), guestAddress));
+	EXPECT_EQ(0, retdec_pe32_retire_stack_object(object.data()));
+	EXPECT_EQ(object.data(), __retdec_pe32_guest_to_host(guestAddress));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
 }
 
 TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)

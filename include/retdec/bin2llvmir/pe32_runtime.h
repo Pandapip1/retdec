@@ -31,6 +31,13 @@ uint32_t retdec_pe32_register_host_function(
 /** Remove the region whose native base exactly matches @p host_base. */
 int retdec_pe32_unregister_host_object(void* host_base);
 
+/**
+ * Preserve an automatic stack mapping in runtime-owned storage.  Generated
+ * code calls this when an escaped native frame returns, so outstanding PE32
+ * guest pointers remain valid after the native stack bytes are reused.
+ */
+int retdec_pe32_retire_stack_object(void* host_base);
+
 /** Remove the region containing @p host_pointer. */
 int retdec_pe32_unregister_host_pointer(void* host_pointer);
 
