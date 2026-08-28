@@ -120,6 +120,25 @@ bool regionCanGrow(const Region& region, uint32_t extent)
 	return true;
 }
 
+bool mappingsHaveSameOffset(
+		uintptr_t firstHost,
+		uint32_t firstGuest,
+		uintptr_t secondHost,
+		uint32_t secondGuest)
+{
+	if (firstHost >= secondHost)
+	{
+		const uintptr_t hostDifference = firstHost - secondHost;
+		return hostDifference <= std::numeric_limits<uint32_t>::max()
+				&& firstGuest >= secondGuest
+				&& firstGuest - secondGuest == hostDifference;
+	}
+	const uintptr_t hostDifference = secondHost - firstHost;
+	return hostDifference <= std::numeric_limits<uint32_t>::max()
+			&& secondGuest >= firstGuest
+			&& secondGuest - firstGuest == hostDifference;
+}
+
 uint32_t allocateGuestBase(uint32_t extent)
 {
 	const uint64_t wideAlignedExtent = std::max(
@@ -165,6 +184,81 @@ uint32_t registerRegion(
 	}
 
 	std::lock_guard<std::mutex> lock(regionsMutex);
+	if (preferredGuestBase != 0)
+	{
+		if (!guestRangeValid(preferredGuestBase, extent))
+		{
+			return 0;
+		}
+
+		Region merged{hostBase, preferredGuestBase, extent};
+		std::vector<bool> mergedRegions(regions.size(), false);
+		bool foundOverlap = false;
+		do
+		{
+			foundOverlap = false;
+			for (size_t i = 0; i < regions.size(); ++i)
+			{
+				const auto& region = regions[i];
+				if (mergedRegions[i]
+						|| (!rangesOverlap(
+								merged.hostBase, merged.extent,
+								region.hostBase, region.extent)
+							&& !rangesOverlap(
+								merged.guestBase, merged.extent,
+								region.guestBase, region.extent)))
+				{
+					continue;
+				}
+				if (!mappingsHaveSameOffset(
+						merged.hostBase, merged.guestBase,
+						region.hostBase, region.guestBase))
+				{
+					return 0;
+				}
+
+				const uintptr_t mergedHostLast = merged.hostBase
+						+ (merged.extent - 1u);
+				const uintptr_t regionHostLast = region.hostBase
+						+ (region.extent - 1u);
+				const uintptr_t unionHostBase = std::min(
+						merged.hostBase, region.hostBase);
+				const uintptr_t unionHostLast = std::max(
+						mergedHostLast, regionHostLast);
+				if (unionHostLast - unionHostBase
+						>= std::numeric_limits<uint32_t>::max())
+				{
+					return 0;
+				}
+				const uint32_t unionExtent = static_cast<uint32_t>(
+						unionHostLast - unionHostBase + 1u);
+				const uint32_t unionGuestBase = std::min(
+						merged.guestBase, region.guestBase);
+				if (!hostRangeValid(unionHostBase, unionExtent)
+						|| !guestRangeValid(unionGuestBase, unionExtent))
+				{
+					return 0;
+				}
+				merged = {unionHostBase, unionGuestBase, unionExtent};
+				mergedRegions[i] = true;
+				foundOverlap = true;
+			}
+		} while (foundOverlap);
+
+		std::vector<Region> retainedRegions;
+		retainedRegions.reserve(regions.size() + 1u);
+		for (size_t i = 0; i < regions.size(); ++i)
+		{
+			if (!mergedRegions[i])
+			{
+				retainedRegions.push_back(regions[i]);
+			}
+		}
+		regions.swap(retainedRegions);
+		regions.push_back(merged);
+		return preferredGuestBase;
+	}
+
 	for (auto& region : regions)
 	{
 		if (region.hostBase == hostBase)
@@ -201,11 +295,7 @@ uint32_t registerRegion(
 		}
 	}
 
-	uint32_t guestBase = preferredGuestBase;
-	if (guestBase == 0)
-	{
-		guestBase = allocateGuestBase(extent);
-	}
+	uint32_t guestBase = allocateGuestBase(extent);
 	if (!guestRangeValid(guestBase, extent))
 	{
 		return 0;

@@ -141,6 +141,40 @@ TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(first.data()));
 }
 
+TEST(Pe32RuntimeTests, CoalescesCompatibleOverlappingFixedMappings)
+{
+	std::array<uint8_t, 16> backingObject{};
+	constexpr uint32_t guestBase = 0x62002000u;
+
+	// PE externals can name overlapping subobjects in reverse address order.
+	ASSERT_EQ(guestBase + 2, retdec_pe32_register_host_object(
+			backingObject.data() + 2, 4, guestBase + 2));
+	ASSERT_EQ(guestBase + 1, retdec_pe32_register_host_object(
+			backingObject.data() + 1, 4, guestBase + 1));
+	ASSERT_EQ(guestBase, retdec_pe32_register_host_object(
+			backingObject.data(), 4, guestBase));
+
+	EXPECT_EQ(guestBase + 5, __retdec_pe32_host_to_guest(
+			backingObject.data() + 5, backingObject.data(), 6));
+	EXPECT_EQ(backingObject.data() + 5,
+			__retdec_pe32_guest_to_host(guestBase + 5));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(backingObject.data()));
+}
+
+TEST(Pe32RuntimeTests, RejectsInconsistentOverlappingFixedMappings)
+{
+	std::array<uint8_t, 16> backingObject{};
+	constexpr uint32_t guestBase = 0x62003000u;
+	ASSERT_EQ(guestBase, retdec_pe32_register_host_object(
+			backingObject.data(), 8, guestBase));
+
+	EXPECT_EQ(0u, retdec_pe32_register_host_object(
+			backingObject.data() + 4, 8, guestBase + 8));
+	EXPECT_EQ(backingObject.data() + 7,
+			__retdec_pe32_guest_to_host(guestBase + 7));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(backingObject.data()));
+}
+
 TEST(Pe32RuntimeTests, TranslatesObjectsAndFunctionsInsideRegisteredSections)
 {
 	std::array<uint8_t, 128> section{};
