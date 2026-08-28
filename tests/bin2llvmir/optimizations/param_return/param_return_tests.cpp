@@ -484,6 +484,113 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(ParamReturnTests, x86CalleeCleanupKeepsDecodedPushOrderPastOlderStackStores)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @divide()
+		define i32 @caller() {
+			%older_-32 = alloca i32
+			%older_-28 = alloca i32
+			%stack_-4 = alloca i32
+			%stack_-8 = alloca i32
+			%stack_-12 = alloca i32
+			%stack_-16 = alloca i32
+			store i32 99, i32* %older_-32
+			store i32 88, i32* %older_-28
+			store volatile i64 4096, i64* @llvm2asm
+			store i32 0, i32* %stack_-4
+			store volatile i64 4097, i64* @llvm2asm
+			store i32 2, i32* %stack_-8
+			store volatile i64 4098, i64* @llvm2asm
+			store i32 22, i32* %stack_-12
+			store volatile i64 4099, i64* @llvm2asm
+			store i32 11, i32* %stack_-16
+			store volatile i64 4100, i64* @llvm2asm
+			%result = call i32 @divide()
+			ret i32 %result
+		}
+	)");
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto caller = retdec::common::Function("caller");
+	for (int offset : {-4, -8, -12, -16, -28, -32})
+	{
+		caller.locals.insert(retdec::common::Object(
+				(offset == -28 || offset == -32 ? "older_" : "stack_")
+						+ std::to_string(offset),
+				retdec::common::Storage::onStack(offset)));
+	}
+	config.getConfig().functions.insert(caller);
+	auto divideConfig = retdec::common::Function("divide");
+	divideConfig.setIsUserDefined();
+	for (const char* name : {"dividend_low", "dividend_high",
+			"divisor_low", "divisor_high"})
+	{
+		retdec::common::Object parameter(name, retdec::common::Storage());
+		parameter.type.setLlvmIr("i32");
+		divideConfig.parameters.push_back(parameter);
+	}
+	config.getConfig().functions.insert(divideConfig);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	AsmInstruction::setLlvmToAsmGlobalVariable(
+			module.get(), module->getGlobalVariable("llvm2asm"));
+	cs_insn pushes[4] = {};
+	for (auto& push : pushes)
+	{
+		push.id = X86_INS_PUSH;
+		push.size = 1;
+	}
+	unsigned push = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* marker = dyn_cast<StoreInst>(&instruction);
+		if (marker != nullptr && marker->getPointerOperand()
+				== module->getGlobalVariable("llvm2asm") && push < 4)
+		{
+			pushes[push].address = 0x1000 + push;
+			AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
+					= &pushes[push++];
+		}
+	}
+	ASSERT_EQ(4u, push);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto ltiTypeConfig = std::make_shared<ctypesparser::TypeConfig>();
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, ltiTypeConfig, image.getImage());
+	pass.runOnModuleCustom(
+			*module, &config, abi, demangler, &image, nullptr, lti);
+
+	auto* divide = module->getFunction("divide");
+	ASSERT_NE(nullptr, divide);
+	CallInst* recoveredCall = nullptr;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* candidate = dyn_cast<CallInst>(&instruction);
+		if (candidate != nullptr && candidate->getCalledFunction() == divide)
+		{
+			recoveredCall = candidate;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(4u, recoveredCall->arg_size());
+	const int64_t expected[] = {11, 22, 2, 0};
+	for (unsigned argumentIndex = 0; argumentIndex < 4; ++argumentIndex)
+	{
+		auto* argument = dyn_cast<ConstantInt>(
+				recoveredCall->getArgOperand(argumentIndex));
+		ASSERT_NE(nullptr, argument);
+		EXPECT_EQ(expected[argumentIndex], argument->getSExtValue());
+	}
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
 {
 	parseInput(R"(

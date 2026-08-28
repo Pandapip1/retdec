@@ -511,8 +511,8 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 		}
 	}
 
-	bool hasStack = false;
-	bool allDecodedPushes = true;
+	bool hasProvenStack = false;
+	bool allProvenStackStoresAreDecodedPushes = true;
 	for (auto* store : stores)
 	{
 		if (!_abi->isStackVariable(store->getPointerOperand())
@@ -520,13 +520,22 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 		{
 			continue;
 		}
-		hasStack = true;
+		if (provenStores.count(store) == 0)
+		{
+			continue;
+		}
+		hasProvenStack = true;
 		auto instruction = AsmInstruction(store);
 		auto* decoded = instruction.isValid() ? instruction.getCapstoneInsn() : nullptr;
-		allDecodedPushes &= decoded != nullptr && decoded->id == X86_INS_PUSH;
+		allProvenStackStoresAreDecodedPushes &= decoded != nullptr
+				&& decoded->id == X86_INS_PUSH;
 	}
+	// Callee-cleanup calls have no caller-side cleanup bound, so collection may
+	// also see older configured stack locals.  Those unrelated stores must not
+	// make us sort the decoded PUSH prefix by frame offset: PUSH traversal order
+	// is the native argument order even when older stack stores follow it.
 	ce->preserveNativeStackOrder(!directStores.empty()
-			|| (hasStack && allDecodedPushes));
+			|| (hasProvenStack && allProvenStackStoresAreDecodedPushes));
 	for (auto* store : directStores)
 	{
 		ce->addDirectArgStore(store);
