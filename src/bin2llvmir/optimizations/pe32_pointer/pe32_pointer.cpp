@@ -1178,8 +1178,7 @@ bool Pe32PointerBridge::run()
 	for (GlobalVariable& global : _module->globals())
 	{
 		hasConfiguredMappings = hasConfiguredMappings
-				|| (!global.isDeclaration()
-						&& configuredGuestAddress(_config, &global) != 0);
+				|| configuredGuestAddress(_config, &global) != 0;
 	}
 	for (Function& function : *_module)
 	{
@@ -1254,10 +1253,6 @@ bool Pe32PointerBridge::run()
 	bool initializerNeeded = false;
 	for (GlobalVariable& global : _module->globals())
 	{
-		if (global.isDeclaration())
-		{
-			continue;
-		}
 		const uint32_t guestAddress = configuredGuestAddress(_config, &global);
 		if (guestAddress == 0)
 		{

@@ -657,6 +657,53 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgeRegistersConfiguredExternalGlobalsAtFixedGuestAddresses)
+{
+	parseInput(R"(
+		@slab.first = external global i32
+		@slab.next = external global i32
+		define i32 @lookup(i32 %offset) {
+			%base = ptrtoint i32* @slab.first to i32
+			%address = add i32 %base, %offset
+			ret i32 %address
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "slab.first", 0x5137be40);
+	addGlobalAddress(config, "slab.next", 0x5137be94);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* initializer = module->getFunction(
+			"__retdec_pe32_initialize_mappings");
+	ASSERT_NE(nullptr, initializer);
+	std::map<std::string, std::pair<uint64_t, uint64_t>> registrations;
+	for (Instruction& instruction : instructions(initializer))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr || call->getCalledFunction() == nullptr
+				|| call->getCalledFunction()->getName()
+						!= "retdec_pe32_register_host_object")
+		{
+			continue;
+		}
+		auto* global = dyn_cast<GlobalVariable>(
+				call->getArgOperand(0)->stripPointerCasts());
+		auto* extent = dyn_cast<ConstantInt>(call->getArgOperand(1));
+		auto* guest = dyn_cast<ConstantInt>(call->getArgOperand(2));
+		ASSERT_NE(nullptr, global);
+		ASSERT_NE(nullptr, extent);
+		ASSERT_NE(nullptr, guest);
+		registrations[global->getName().str()] = {
+				extent->getZExtValue(), guest->getZExtValue()};
+	}
+	EXPECT_EQ(std::make_pair(uint64_t{84}, uint64_t{0x5137be40}),
+			registrations["slab.first"]);
+	EXPECT_EQ(std::make_pair(uint64_t{4}, uint64_t{0x5137be94}),
+			registrations["slab.next"]);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		bridgeRegistersOnlyAddressTakenFunctionsAndAllowsGlobalDce)
 {
 	parseInput(R"(
