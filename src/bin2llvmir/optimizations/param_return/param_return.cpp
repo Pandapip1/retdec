@@ -940,10 +940,23 @@ void ParamReturn::modifyType(DataFlowEntry& de) const
 		{
 			auto* type = de.argTypes()[argument] != nullptr
 					? de.argTypes()[argument] : _abi->getDefaultType();
-			if (args[argument] == nullptr)
+			auto* argumentInstruction = dyn_cast_or_null<Instruction>(
+					args[argument]);
+			if (args[argument] == nullptr
+					|| isa<AllocaInst>(args[argument])
+					|| (argumentInstruction != nullptr
+							&& argumentInstruction->getParent() != nullptr
+							&& _abi->isStackVariable(args[argument])))
 			{
 				args[argument] = modifier.getStackVariable(
 						de.getFunction(), offset, type).first;
+				auto* physicalPointerType = PointerType::get(type, 0);
+				if (args[argument]->getType() != physicalPointerType)
+				{
+					auto* stackInstruction = cast<Instruction>(args[argument]);
+					args[argument] = IrModifier::convertValueToTypeAfter(
+							args[argument], physicalPointerType, stackInstruction);
+				}
 			}
 			uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
 			offset += std::max<uint64_t>(
@@ -1103,8 +1116,16 @@ void ParamReturn::applyToIr(DataFlowEntry& de)
 		int64_t offset = slotSize;
 		for (auto* type : definitionArgTypes)
 		{
-			definitionArgs.push_back(
-					modifier.getStackVariable(fnc, offset, type).first);
+			Value* stackArgument =
+					modifier.getStackVariable(fnc, offset, type).first;
+			auto* physicalPointerType = PointerType::get(type, 0);
+			if (stackArgument->getType() != physicalPointerType)
+			{
+				stackArgument = IrModifier::convertValueToTypeAfter(
+						stackArgument, physicalPointerType,
+						cast<Instruction>(stackArgument));
+			}
+			definitionArgs.push_back(stackArgument);
 			uint64_t size = _module->getDataLayout().getTypeStoreSize(type);
 			offset += std::max<uint64_t>(slotSize,
 					((size + slotSize - 1) / slotSize) * slotSize);

@@ -1222,7 +1222,14 @@ IrModifier::FunctionPair IrModifier::modifyFunction(
 		{
 			if (conv == a)
 			{
-				s->insertBefore(&nf->front().front());
+				if (auto* valueInstruction = dyn_cast<Instruction>(v))
+				{
+					s->insertAfter(valueInstruction);
+				}
+				else
+				{
+					s->insertBefore(&nf->front().front());
+				}
 			}
 			else
 			{
