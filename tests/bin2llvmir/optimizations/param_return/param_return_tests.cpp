@@ -277,6 +277,93 @@ TEST_F(ParamReturnTests, x86ExternalCallConsumesComputedPushValueDirectly)
 	checkModuleAgainstExpectedIr(exp);
 }
 
+TEST_F(ParamReturnTests, x86RemovesFilteredOutgoingStoresAfterFixedArityCall)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		declare i32 @consume()
+		define i32 @caller() {
+			%sp0 = load i32, i32* @esp
+			%sp1 = sub i32 %sp0, 4
+			%slot1 = inttoptr i32 %sp1 to i32*
+			store i32 77, i32* %slot1
+			store i32 %sp1, i32* @esp
+			%sp2 = sub i32 %sp1, 4
+			%slot2 = inttoptr i32 %sp2 to i32*
+			store i32 66, i32* %slot2
+			store i32 %sp2, i32* @esp
+			%sp3 = sub i32 %sp2, 4
+			%slot3 = inttoptr i32 %sp3 to i32*
+			store i32 55, i32* %slot3
+			store i32 %sp3, i32* @esp
+			%sp4 = sub i32 %sp3, 4
+			%slot4 = inttoptr i32 %sp4 to i32*
+			store i32 44, i32* %slot4
+			store i32 %sp4, i32* @esp
+			%sp5 = sub i32 %sp4, 4
+			%slot5 = inttoptr i32 %sp5 to i32*
+			store i32 33, i32* %slot5
+			store i32 %sp5, i32* @esp
+			%sp6 = sub i32 %sp5, 4
+			%slot6 = inttoptr i32 %sp6 to i32*
+			store i32 22, i32* %slot6
+			store i32 %sp6, i32* @esp
+			%sp7 = sub i32 %sp6, 4
+			%slot7 = inttoptr i32 %sp7 to i32*
+			store i32 11, i32* %slot7
+			store i32 %sp7, i32* @esp
+			%result = call i32 @consume()
+			%current = load i32, i32* @esp
+			%clean = add i32 %current, 28
+			store i32 %clean, i32* @esp
+			ret i32 %result
+		}
+	)");
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto function = retdec::common::Function("consume");
+	function.setIsUserDefined();
+	for (const char* name : {"arg1", "arg2", "arg3"})
+	{
+		retdec::common::Object parameter(name, retdec::common::Storage());
+		parameter.type.setLlvmIr("i32");
+		function.parameters.push_back(parameter);
+	}
+	config.getConfig().functions.insert(function);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+
+	pass.runOnModuleCustom(*module, &config, abi, demangler);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	ASSERT_EQ(3u, consume->arg_size());
+	CallInst* recoveredCall = nullptr;
+	unsigned rawStackStores = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			if (call->getCalledFunction() == consume)
+			{
+				recoveredCall = call;
+			}
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			rawStackStores += isa<IntToPtrInst>(store->getPointerOperand());
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	EXPECT_EQ(3u, recoveredCall->arg_size());
+	EXPECT_EQ(0u, rawStackStores);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(ParamReturnTests, x86CallerCleanupPreservesHiddenTrailingStackSlot)
 {
 	parseInput(R"(

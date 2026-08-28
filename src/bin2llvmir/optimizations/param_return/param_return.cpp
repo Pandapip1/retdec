@@ -1318,7 +1318,7 @@ void ParamReturn::eraseRecoveredX86CallArtifacts(
 			}
 		}
 
-		for (auto* store : entry.directArgStores())
+		for (auto* store : entry.obsoleteStackArgStores())
 		{
 			if (store != nullptr && store->getParent() != nullptr)
 			{

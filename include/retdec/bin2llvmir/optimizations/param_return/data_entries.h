@@ -129,6 +129,7 @@ class CallEntry : public CallableEntry
 
 		void addDirectArgStore(llvm::StoreInst* store);
 		void addProvenStackArgStore(llvm::StoreInst* store);
+		void addObsoleteStackArgStore(llvm::StoreInst* store);
 		void addObsoleteStackCleanupMarker(llvm::StoreInst* marker);
 		void preserveNativeStackOrder(bool preserve = true);
 
@@ -142,6 +143,7 @@ class CallEntry : public CallableEntry
 		const std::vector<llvm::LoadInst*>& retLoads() const;
 		const std::set<llvm::StoreInst*>& directArgStores() const;
 		const std::set<llvm::StoreInst*>& provenStackArgStores() const;
+		const std::set<llvm::StoreInst*>& obsoleteStackArgStores() const;
 		const std::vector<llvm::StoreInst*>& obsoleteStackCleanupMarkers() const;
 		bool isDirectArgument(const llvm::Value* value) const;
 		bool preservesNativeStackOrder() const;
@@ -157,6 +159,7 @@ class CallEntry : public CallableEntry
 		std::vector<llvm::StoreInst*> _argStores;
 		std::set<llvm::StoreInst*> _directArgStores;
 		std::set<llvm::StoreInst*> _provenStackArgStores;
+		std::set<llvm::StoreInst*> _obsoleteStackArgStores;
 		std::vector<llvm::StoreInst*> _obsoleteStackCleanupMarkers;
 		bool _preserveNativeStackOrder = false;
 };

@@ -533,6 +533,11 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	}
 	for (auto* store : provenStores)
 	{
+		// Every proven native stack write in the caller-cleanup window becomes
+		// obsolete once the call is rebuilt with LLVM arguments.  Keep this
+		// independent of the filtered argument list: fixed-arity callees may
+		// intentionally discard additional native stack words.
+		ce->addObsoleteStackArgStore(store);
 		if (std::find(stores.begin(), stores.end(), store) != stores.end())
 		{
 			ce->addProvenStackArgStore(store);

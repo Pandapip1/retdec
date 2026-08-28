@@ -373,6 +373,11 @@ void CallEntry::addProvenStackArgStore(StoreInst* store)
 	_provenStackArgStores.insert(store);
 }
 
+void CallEntry::addObsoleteStackArgStore(StoreInst* store)
+{
+	_obsoleteStackArgStores.insert(store);
+}
+
 void CallEntry::addObsoleteStackCleanupMarker(StoreInst* marker)
 {
 	if (marker != nullptr)
@@ -443,6 +448,11 @@ const std::set<StoreInst*>& CallEntry::directArgStores() const
 const std::set<StoreInst*>& CallEntry::provenStackArgStores() const
 {
 	return _provenStackArgStores;
+}
+
+const std::set<StoreInst*>& CallEntry::obsoleteStackArgStores() const
+{
+	return _obsoleteStackArgStores;
 }
 
 const std::vector<StoreInst*>& CallEntry::obsoleteStackCleanupMarkers() const
