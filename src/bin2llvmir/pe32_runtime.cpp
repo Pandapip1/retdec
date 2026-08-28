@@ -294,10 +294,6 @@ uint32_t registerRegion(
 		}
 		if (rangesOverlap(hostBase, extent, region.hostBase, region.extent))
 		{
-			if (!allowFixedOverlap || !region.fixed)
-			{
-				return 0;
-			}
 			uint32_t derivedGuestBase = 0;
 			if (hostBase < region.hostBase)
 			{
@@ -322,7 +318,59 @@ uint32_t registerRegion(
 				derivedGuestBase = region.guestBase
 						+ static_cast<uint32_t>(difference);
 			}
-			return registerFixedRegion(derivedGuestBase);
+
+			if (region.fixed)
+			{
+				if (!allowFixedOverlap)
+				{
+					return 0;
+				}
+				return registerFixedRegion(derivedGuestBase);
+			}
+
+			// Generated PE32 stack frames may escape to asynchronous consumers.
+			// Preserve their address translation after the producing function
+			// returns.  A later stack frame that partially overlaps the retained
+			// mapping must extend it with the same host/guest offset, rather than
+			// invalidate an outstanding guest token.
+			const uintptr_t regionHostLast = region.hostBase
+					+ (region.extent - 1u);
+			const uintptr_t requestedHostLast = hostBase + (extent - 1u);
+			const uintptr_t unionHostBase = std::min(region.hostBase, hostBase);
+			const uintptr_t unionHostLast = std::max(
+					regionHostLast, requestedHostLast);
+			if (unionHostLast - unionHostBase
+					>= std::numeric_limits<uint32_t>::max())
+			{
+				return 0;
+			}
+			const uint32_t unionExtent = static_cast<uint32_t>(
+					unionHostLast - unionHostBase + 1u);
+			const uint32_t unionGuestBase = std::min(
+					region.guestBase, derivedGuestBase);
+			if (!hostRangeValid(unionHostBase, unionExtent)
+					|| !guestRangeValid(unionGuestBase, unionExtent))
+			{
+				return 0;
+			}
+			for (const auto& other : regions)
+			{
+				if (&other == &region)
+				{
+					continue;
+				}
+				if (rangesOverlap(
+							unionHostBase, unionExtent,
+							other.hostBase, other.extent)
+						|| rangesOverlap(
+							unionGuestBase, unionExtent,
+							other.guestBase, other.extent))
+				{
+					return 0;
+				}
+			}
+			region = {unionHostBase, unionGuestBase, unionExtent, false};
+			return derivedGuestBase;
 		}
 	}
 
@@ -365,7 +413,7 @@ extern "C" int retdec_pe32_unregister_host_object(void* hostBase)
 {
 	const auto address = reinterpret_cast<uintptr_t>(hostBase);
 	std::lock_guard<std::mutex> lock(regionsMutex);
-	auto region = std::find_if(
+	const auto region = std::find_if(
 			regions.begin(), regions.end(),
 			[address](const Region& item) { return item.hostBase == address; });
 	if (region == regions.end())

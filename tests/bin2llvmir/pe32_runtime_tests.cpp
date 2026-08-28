@@ -107,24 +107,25 @@ TEST(Pe32RuntimeTests, GrowsRepeatedKnownAllocationAroundContainedPointer)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
 }
 
-TEST(Pe32RuntimeTests, ReusesOverlappingReturnedFrameAfterUnregistration)
+TEST(Pe32RuntimeTests, KeepsEscapedPointerAcrossOverlappingStackFrames)
 {
 	std::array<uint8_t, 256> stackStorage{};
 	const auto returnedFrameGuest = __retdec_pe32_host_to_guest(
 			stackStorage.data() + 44, stackStorage.data() + 32, 64);
 	ASSERT_NE(0u, returnedFrameGuest);
 
-	// A differently based frame cannot silently replace a still-live overlap.
-	EXPECT_EQ(0u, __retdec_pe32_host_to_guest(
-			stackStorage.data() + 12, stackStorage.data(), 128));
-	ASSERT_EQ(1, retdec_pe32_unregister_host_object(stackStorage.data() + 32));
-
-	const auto reusedFrameGuest = __retdec_pe32_host_to_guest(
+	// A later, differently based frame on the same native stack extends the
+	// retained mapping without invalidating the escaped guest token.
+	const auto expandedFrameGuest = __retdec_pe32_host_to_guest(
 			stackStorage.data() + 12, stackStorage.data(), 128);
-	ASSERT_NE(0u, reusedFrameGuest);
+	ASSERT_NE(0u, expandedFrameGuest);
+	EXPECT_EQ(returnedFrameGuest - 44, expandedFrameGuest - 12);
+	EXPECT_EQ(stackStorage.data() + 44,
+			__retdec_pe32_guest_to_host(returnedFrameGuest));
 	EXPECT_EQ(stackStorage.data() + 100,
-			__retdec_pe32_guest_to_host(reusedFrameGuest + 88));
+			__retdec_pe32_guest_to_host(expandedFrameGuest + 88));
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(stackStorage.data()));
+	EXPECT_EQ(nullptr, __retdec_pe32_guest_to_host(returnedFrameGuest));
 }
 
 TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)

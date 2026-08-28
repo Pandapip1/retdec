@@ -1074,7 +1074,6 @@ bool Pe32PointerBridge::run()
 	std::vector<PtrToIntInst*> hostEscapes;
 	std::vector<IntToPtrInst*> guestDereferences;
 	std::vector<AddrSpaceCastInst*> addressSpaceCasts;
-	std::map<Function*, std::set<AllocaInst*>> stackMappings;
 	for (Function& function : *_module)
 	{
 		if (function.getName() == "__retdec_pe32_host_to_guest"
@@ -1117,27 +1116,6 @@ bool Pe32PointerBridge::run()
 					addressSpaceCasts.push_back(cast);
 				}
 			}
-		}
-	}
-	auto rememberStackMapping = [&](Value* pointer)
-	{
-		auto* base = dyn_cast<AllocaInst>(
-				GetUnderlyingObject(pointer, _module->getDataLayout()));
-		if (base != nullptr)
-		{
-			stackMappings[base->getFunction()].insert(base);
-		}
-	};
-	for (PtrToIntInst* escape : hostEscapes)
-	{
-		rememberStackMapping(escape->getPointerOperand());
-	}
-	for (AddrSpaceCastInst* cast : addressSpaceCasts)
-	{
-		auto* sourceType = llvm::cast<PointerType>(cast->getSrcTy());
-		if (sourceType->getAddressSpace() == 0)
-		{
-			rememberStackMapping(cast->getOperand(0));
 		}
 	}
 	auto nativeEntryWrappers = findNativeEntryWrappers(
@@ -1231,19 +1209,6 @@ bool Pe32PointerBridge::run()
 	{
 		return false;
 	}
-	Function* unregisterObject = nullptr;
-	if (!stackMappings.empty())
-	{
-		unregisterObject = getOrCreateBridgeFunction(
-				_module,
-				"retdec_pe32_unregister_host_object",
-				FunctionType::get(int32, {bytePointer}, false));
-		if (unregisterObject == nullptr)
-		{
-			return false;
-		}
-	}
-
 	auto* initializerType = FunctionType::get(Type::getVoidTy(context), false);
 	auto* initializer = Function::Create(
 			initializerType,
@@ -1404,27 +1369,6 @@ bool Pe32PointerBridge::run()
 		replacement->takeName(cast);
 		cast->replaceAllUsesWith(replacement);
 		cast->eraseFromParent();
-	}
-	for (const auto& functionMappings : stackMappings)
-	{
-		std::vector<ReturnInst*> returns;
-		for (BasicBlock& block : *functionMappings.first)
-		{
-			if (auto* returnInstruction = dyn_cast<ReturnInst>(block.getTerminator()))
-			{
-				returns.push_back(returnInstruction);
-			}
-		}
-		for (ReturnInst* returnInstruction : returns)
-		{
-			IRBuilder<> builder(returnInstruction);
-			for (AllocaInst* allocation : functionMappings.second)
-			{
-				builder.CreateCall(
-						unregisterObject,
-						{pointerAsBytePointer(builder, allocation)});
-			}
-		}
 	}
 	changed |= createNativeEntryWrappers(
 			_module, nativeEntryWrappers, hostToGuest);
