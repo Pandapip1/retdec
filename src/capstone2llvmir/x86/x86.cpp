@@ -4989,7 +4989,7 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFatan(cs_insn* i, cs_x86* xi, l
 	auto* fpatan = llvm::InlineAsm::get(
 			functionType,
 			"fpatan",
-			"={st},0,{st(1)},~{fpsr},~{flags}",
+			"={st},0,{st(1)},~{st(1)},~{fpsr},~{flags}",
 			true);
 	// FPATAN computes atan2(ST(1), ST(0)), stores it in ST(1), and pops.
 	auto* atan = irb.CreateCall(fpatan, {op0, op1});

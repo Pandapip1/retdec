@@ -12763,10 +12763,45 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPATAN_compute)
 	auto calls = getInlineAsmCalls(translated);
 	ASSERT_EQ(1, calls.size());
 	EXPECT_EQ("fpatan", calls[0]->getAsmString());
-	EXPECT_EQ("={st},0,{st(1)},~{fpsr},~{flags}",
+	EXPECT_EQ("={st},0,{st(1)},~{st(1)},~{fpsr},~{flags}",
 			calls[0]->getConstraintString());
 	EXPECT_TRUE(calls[0]->hasSideEffects());
 	EXPECT_EQ(nullptr, _module.getFunction("__asm_fpatan"));
+}
+
+// Exercise the same early-clobber/tied-output/consumed-ST(1) contract against
+// a native compiler.  Omitting the ST(1) clobber makes the backend emit an
+// additional pop after FPATAN and corrupts the result in subsequent x87 code.
+TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPATAN_native_stack_effect)
+{
+	ALL_MODES;
+#if defined(__i386__) || defined(__x86_64__)
+	auto fpatan = [](long double x, long double y)
+	{
+		long double result;
+		asm volatile(
+				"fpatan"
+				: "=&t"(result)
+				: "0"(x), "u"(y)
+				: "st(1)");
+		return result;
+	};
+
+	for (const auto& operands : std::vector<std::pair<long double, long double>>{
+			{1.0L, 1.0L},
+			{-1.0L, 1.0L},
+			{-1.0L, -1.0L},
+			{1.0L, -1.0L},
+			{2.0L, 0.0L}})
+	{
+		EXPECT_NEAR(
+				static_cast<double>(fpatan(operands.first, operands.second)),
+				static_cast<double>(std::atan2(operands.second, operands.first)),
+				1.0e-15);
+	}
+#else
+	GTEST_SKIP() << "native x87 code-generation test requires an x86 host";
+#endif
 }
 
 //
