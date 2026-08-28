@@ -915,6 +915,11 @@ TEST_F(Pe32PointerLegalizationTests,
 			retdec::common::AddressRange(0x401000, 0x401010));
 
 	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* encoding = mdconst::dyn_extract_or_null<ConstantInt>(
+			module->getModuleFlag(
+					Pe32PointerBridge::ExternalPointerEncodingModuleFlag));
+	ASSERT_NE(nullptr, encoding);
+	EXPECT_EQ(1u, encoding->getZExtValue());
 	auto* relocated = module->getFunction("relocated");
 	auto* privateFunction = module->getFunction("private");
 	ASSERT_NE(nullptr, relocated);

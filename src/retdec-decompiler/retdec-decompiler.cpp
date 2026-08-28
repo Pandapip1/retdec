@@ -643,7 +643,7 @@ General arguments:
 	[--cleanup] Removes temporary files created during the decompilation.
 	[--config] Specify JSON decompilation configuration file.
 	[--disable-static-code-detection] Prevents detection of statically linked code.
-	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked.
+	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked. External PE HIGHLOW cells must retain their original 32-bit guest addresses rather than native ELF symbol relocations; the output module records this contract in retdec.pe32.external-pointers-use-guest-addresses.
 	[--stop-after bin2llvmir] Stops after emitting backend LLVM IR and bitcode, without running LLVM IR to HLL conversion.
 Selective decompilation arguments:
 	[--select-ranges RANGES] Specify a comma separated list of ranges to decompile (example: 0x100-0x200,0x300-0x400,0x500-0x600).
@@ -690,6 +690,10 @@ PE32 native-retarget runtime hook ABI:
 	<guest-symbol>.retdec_native wrapper. Proven pointer parameters use native
 	void* ABI and request size-zero containing-mapping registration; other
 	parameters pass through. Return values retain the original guest ABI.
+	External PE HIGHLOW data cells retain their original four-byte preferred
+	guest addresses. The generated constructor maps referenced native functions
+	and objects to those tokens; external-image serializers must not emit native
+	ELF symbol relocations into the cells.
 Other arguments:
 	[-h|--help] Show this help.
 	[--version] Show RetDec version.

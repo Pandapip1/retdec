@@ -61,11 +61,21 @@ class Pe32PointerLegalization : public llvm::ModulePass
  * pointer dereferences become native pointer parameters; all other parameters
  * pass through unchanged.  Return values retain the guest function's original
  * ABI, including guest-encoded integer pointer returns.
+ *
+ * PE data that remains outside the LLVM module has the same guest ABI.  In
+ * particular, a PE32 HIGHLOW cell must retain its original four-byte preferred
+ * guest address; it must not become a native ELF relocation against the mapped
+ * function or object.  The generated mapping constructor registers the native
+ * definitions at those guest addresses.  The module flag named by
+ * ExternalPointerEncodingModuleFlag makes this requirement machine-readable
+ * to external-image serializers.
  */
 class Pe32PointerBridge : public llvm::ModulePass
 {
 	public:
 		static char ID;
+		static constexpr const char* ExternalPointerEncodingModuleFlag =
+				"retdec.pe32.external-pointers-use-guest-addresses";
 
 		Pe32PointerBridge();
 		bool runOnModule(llvm::Module& module) override;

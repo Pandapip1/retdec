@@ -1202,6 +1202,17 @@ bool Pe32PointerBridge::run()
 	{
 		return changed;
 	}
+	// External PE image data is serialized separately from this LLVM module in
+	// native-retargeting workflows.  Its HIGHLOW cells must remain 32-bit guest
+	// tokens: emitting native ELF symbol relocations would both overflow above
+	// 4 GiB and bypass the mapping constructor below.  Publish the contract in
+	// the module so serializers do not have to infer it from hook declarations.
+	if (_module->getModuleFlag(ExternalPointerEncodingModuleFlag) == nullptr)
+	{
+		_module->addModuleFlag(
+				Module::Error, ExternalPointerEncodingModuleFlag, uint32_t(1));
+		changed = true;
+	}
 
 	auto* bytePointer = Type::getInt8PtrTy(context);
 	auto* hostToGuest = getOrCreateBridgeFunction(
