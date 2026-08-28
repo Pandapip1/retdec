@@ -20,6 +20,8 @@
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
+#include "retdec/bin2llvmir/providers/fileimage.h"
+#include "retdec/fileformat/file_format/pe/pe_format.h"
 
 using namespace llvm;
 
@@ -495,6 +497,93 @@ bool isNativeEntryPoint(const Config* config, const common::Function* function)
 	return false;
 }
 
+std::set<uint32_t> pe32BaseRelocationTargets(FileImage* fileImage)
+{
+	std::set<uint32_t> targets;
+	if (fileImage == nullptr || fileImage->getImage() == nullptr)
+	{
+		return targets;
+	}
+	auto* pe = dynamic_cast<fileformat::PeFormat*>(
+			fileImage->getFileFormat());
+	if (pe == nullptr)
+	{
+		return targets;
+	}
+
+	// IMAGE_DIRECTORY_ENTRY_BASERELOC and IMAGE_REL_BASED_HIGHLOW are stable
+	// PE constants.  A HIGHLOW cell contains the preferred 32-bit guest VA
+	// which must be mapped to its native definition when retargeted to ELF64.
+	static constexpr uint64_t baseRelocationDirectory = 5;
+	static constexpr uint16_t highLowRelocation = 3;
+	uint64_t directory = 0;
+	uint64_t directorySize = 0;
+	if (!pe->getDataDirectoryAbsolute(
+			baseRelocationDirectory, directory, directorySize)
+			|| directorySize < 8 || directory > UINT64_MAX - directorySize)
+	{
+		return targets;
+	}
+
+	auto* image = fileImage->getImage();
+	const uint64_t imageBase = image->getBaseAddress();
+	const uint64_t end = directory + directorySize;
+	for (uint64_t cursor = directory; cursor <= end - 8; )
+	{
+		uint64_t pageRva = 0;
+		uint64_t blockSize = 0;
+		if (!image->getXByte(cursor, 4, pageRva)
+				|| !image->getXByte(cursor + 4, 4, blockSize)
+				|| blockSize < 8 || blockSize > end - cursor)
+		{
+			break;
+		}
+		for (uint64_t offset = 8; offset + 2 <= blockSize; offset += 2)
+		{
+			uint64_t raw = 0;
+			if (!image->getXByte(cursor + offset, 2, raw))
+			{
+				continue;
+			}
+			if ((raw >> 12) != highLowRelocation)
+			{
+				continue;
+			}
+			const uint64_t cell = imageBase + pageRva + (raw & 0xfff);
+			uint64_t target = 0;
+			if (cell >= imageBase && image->getXByte(cell, 4, target)
+					&& target <= UINT32_MAX)
+			{
+				targets.insert(static_cast<uint32_t>(target));
+			}
+		}
+		cursor += blockSize;
+	}
+	return targets;
+}
+
+std::set<Function*> functionsReferencedByPeBaseRelocations(
+		Module* module,
+		Config* config)
+{
+	std::set<Function*> functions;
+	auto targets = pe32BaseRelocationTargets(
+			FileImageProvider::getFileImage(module));
+	if (targets.empty())
+	{
+		return functions;
+	}
+	for (Function& function : *module)
+	{
+		if (!function.isDeclaration()
+				&& targets.count(configuredGuestAddress(config, &function)) != 0)
+		{
+			functions.insert(&function);
+		}
+	}
+	return functions;
+}
+
 bool localizePrivateFunctions(Module* module, Config* config)
 {
 	// A lifted image's private implementation functions are not process-wide
@@ -830,11 +919,13 @@ bool Pe32PointerBridge::run()
 
 	auto& context = _module->getContext();
 	auto* int32 = Type::getInt32Ty(context);
+	auto relocationTargetFunctions = functionsReferencedByPeBaseRelocations(
+			_module, _config);
 	bool changed = localizePrivateFunctions(_module, _config);
 	// Record this before generating the constructor: passing a function to the
 	// registration runtime is itself address-taking and must not make every
 	// decoded direct-call-only function look like a required indirect target.
-	std::set<Function*> functionsNeedingMappings;
+	std::set<Function*> functionsNeedingMappings = relocationTargetFunctions;
 	for (Function& function : *_module)
 	{
 		if (!function.isDeclaration() && function.hasAddressTaken())

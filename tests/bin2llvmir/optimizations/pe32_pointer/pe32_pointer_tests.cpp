@@ -14,6 +14,8 @@
 
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
+#include "retdec/bin2llvmir/providers/fileimage.h"
+#include "retdec/fileformat/file_format/pe/pe_format.h"
 
 using namespace llvm;
 
@@ -24,6 +26,72 @@ namespace tests {
 class Pe32PointerLegalizationTests: public LlvmIrTests
 {
 	protected:
+		void addPe32HighLowRelocation(
+				Config& config,
+				uint32_t cellAddress,
+				uint32_t targetAddress)
+		{
+			// Minimal PE32 image with one .reloc section.  Its relocation block
+			// describes a HIGHLOW cell whose original contents are a preferred
+			// guest function VA.
+			std::vector<uint8_t> bytes(0x400);
+			auto put16 = [&bytes](size_t offset, uint16_t value)
+			{
+				bytes[offset] = value;
+				bytes[offset + 1] = value >> 8;
+			};
+			auto put32 = [&bytes](size_t offset, uint32_t value)
+			{
+				for (unsigned i = 0; i < 4; ++i)
+				{
+					bytes[offset + i] = value >> (8 * i);
+				}
+			};
+
+			bytes[0] = 'M';
+			bytes[1] = 'Z';
+			put32(0x3c, 0x40);
+			bytes[0x40] = 'P';
+			bytes[0x41] = 'E';
+			put16(0x44, 0x14c);
+			put16(0x46, 1);
+			put16(0x54, 0xe0);
+			put16(0x56, 0x102);
+			put16(0x58, 0x10b);
+			put32(0x68, 0x1000);
+			put32(0x74, 0x400000);
+			put32(0x78, 0x1000);
+			put32(0x7c, 0x200);
+			put32(0x90, 0x3000);
+			put32(0x94, 0x200);
+			put16(0xa0, 3);
+			put32(0xb4, 16);
+			put32(0xe0, 0x2000);
+			put32(0xe4, 12);
+			bytes[0x138] = '.';
+			bytes[0x139] = 'r';
+			bytes[0x13a] = 'e';
+			bytes[0x13b] = 'l';
+			bytes[0x13c] = 'o';
+			bytes[0x13d] = 'c';
+			put32(0x140, 0x200);
+			put32(0x144, 0x2000);
+			put32(0x148, 0x200);
+			put32(0x14c, 0x200);
+			put32(0x15c, 0x42000040);
+			put32(0x200, 0x2000);
+			put32(0x204, 12);
+			put16(0x208, 0x3000 | (cellAddress & 0xfff));
+			put16(0x20a, 0);
+			put32(0x200 + (cellAddress & 0xfff), targetAddress);
+
+			auto pe = std::make_shared<fileformat::PeFormat>(
+					bytes.data(), bytes.size());
+			ASSERT_TRUE(pe->isInValidState());
+			ASSERT_NE(nullptr, FileImageProvider::addFileImage(
+					module.get(), pe, &config));
+		}
+
 		Config createConfig(const char* fileFormat, unsigned bitSize)
 		{
 			auto config = Config::empty(module.get());
@@ -558,6 +626,55 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_TRUE(collisions.empty());
 	EXPECT_FALSE(verifyModule(*first, &errs()));
 	EXPECT_FALSE(verifyModule(*second, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeMapsDataRelocatedFunctionWhileKeepingItImageLocal)
+{
+	parseInput(R"(
+		define void @root() {
+			ret void
+		}
+		define void @relocated() {
+			ret void
+		}
+		define void @private() {
+			ret void
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addFunctionRange(config, "root", 0x401000, 0x401010);
+	addFunctionRange(config, "relocated", 0x402000, 0x402010);
+	addFunctionRange(config, "private", 0x403000, 0x403010);
+	addPe32HighLowRelocation(config, 0x402020, 0x402000);
+	config.getConfig().parameters.selectedRanges.insert(
+			retdec::common::AddressRange(0x401000, 0x401010));
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* relocated = module->getFunction("relocated");
+	auto* privateFunction = module->getFunction("private");
+	ASSERT_NE(nullptr, relocated);
+	ASSERT_NE(nullptr, privateFunction);
+	EXPECT_TRUE(relocated->hasInternalLinkage());
+	EXPECT_TRUE(privateFunction->hasInternalLinkage());
+
+	auto* initializer = module->getFunction(
+			"__retdec_pe32_initialize_mappings");
+	ASSERT_NE(nullptr, initializer);
+	bool registered = false;
+	for (Instruction& instruction : instructions(initializer))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr || call->getCalledFunction() == nullptr
+				|| call->getCalledFunction()->getName()
+						!= "retdec_pe32_register_host_function")
+		{
+			continue;
+		}
+		registered |= call->getArgOperand(0)->stripPointerCasts() == relocated;
+	}
+	EXPECT_TRUE(registered);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
 TEST_F(Pe32PointerLegalizationTests,
