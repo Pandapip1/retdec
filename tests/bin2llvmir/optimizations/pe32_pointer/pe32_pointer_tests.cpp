@@ -162,6 +162,27 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgeIgnoresAbiRegisterEntriesErasedByRegisterLocalization)
+{
+	parseInput(R"(
+		@eax = internal global i32 0
+		@ordinary_pe_global = global i32 0
+	)");
+	auto config = createConfig("pe32", 32);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	ASSERT_NE(nullptr, abi);
+	auto* erasedRegister = getGlobalByName("eax");
+	abi->addRegister(X86_REG_EAX, erasedRegister);
+	erasedRegister->eraseFromParent();
+
+	bridge.runOnModuleCustom(*module, &config);
+	auto* ordinary = module->getGlobalVariable("ordinary_pe_global");
+	ASSERT_NE(nullptr, ordinary);
+	EXPECT_FALSE(ordinary->isThreadLocal());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		legalizesAdjacentGlobalAndStackPointerCells)
 {
 	parseInput(R"(
@@ -511,6 +532,9 @@ TEST_F(Pe32PointerLegalizationTests,
 			"retdec-pe32-pointer-bridge",
 			"retdec-provider-init",
 			"retdec-pe32-pointer-cells",
+			"retdec-idioms",
+			"instcombine",
+			"retdec-inst-opt",
 			"retdec-write-bc"};
 
 	ASSERT_TRUE(Pe32PointerBridge::enableInPipeline(passes));
@@ -518,12 +542,35 @@ TEST_F(Pe32PointerLegalizationTests,
 			"retdec-provider-init",
 			"retdec-pe32-pointer-cells",
 			"retdec-pe32-pointer-bridge",
+			"retdec-idioms",
+			"retdec-inst-opt",
 			"retdec-write-bc"};
 	EXPECT_EQ(expected, passes);
 
 	std::vector<std::string> missingLegalization{"retdec-write-bc"};
 	EXPECT_FALSE(Pe32PointerBridge::enableInPipeline(missingLegalization));
 	EXPECT_EQ(1u, missingLegalization.size());
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeMapsAndWrapsSelectedRelocatedScalarEntry)
+{
+	parseInput(R"(
+		declare i32 @callee(i32, i32, i32)
+		define i32 @entry(i32 %arg) {
+			%result = call i32 @callee(i32 %arg, i32 1, i32 0)
+			ret i32 %result
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addFunctionRange(config, "entry", 0x28097cc9, 0x28097cda);
+	config.getConfig().parameters.selectedRanges.insert(
+			retdec::common::AddressRange(0x28097cc9, 0x28097cda));
+	addPe32HighLowRelocation(config, 0x280a0000, 0x28097cc9);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	EXPECT_NE(nullptr, module->getFunction("entry.retdec_native"));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
 TEST_F(Pe32PointerLegalizationTests,

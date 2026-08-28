@@ -67,7 +67,24 @@ bool Pe32PointerBridge::enableInPipeline(std::vector<std::string>& passes)
 	{
 		return false;
 	}
-	passes.insert(std::next(legalization), "retdec-pe32-pointer-bridge");
+	auto bridge = passes.insert(
+			std::next(legalization), "retdec-pe32-pointer-bridge");
+
+	// LLVM's legacy InstCombine can recurse indefinitely or crash when it
+	// sees the guest/host translation calls after RetDec's idiom rewriting.
+	// Later RetDec instruction passes still simplify this IR, and the final
+	// verifier accepts it.  Keep all earlier InstCombine passes and suppress
+	// only the one directly following the first post-bridge idiom pass.
+	auto idioms = std::find(
+			std::next(bridge), passes.end(), "retdec-idioms");
+	if (idioms != passes.end())
+	{
+		auto following = std::next(idioms);
+		if (following != passes.end() && *following == "instcombine")
+		{
+			passes.erase(following);
+		}
+	}
 	return true;
 }
 
@@ -1025,11 +1042,17 @@ bool Pe32PointerBridge::run()
 		// retargeting may execute lifted task and callback entry points on
 		// different host threads, so process-global register, flag, and x87
 		// storage allows one thread to corrupt another thread's machine state.
-		for (GlobalVariable* reg : abi->getRegisters())
+		// Register-localization can erase architectural globals while the ABI
+		// provider still retains their old addresses.  Iterating those stale
+		// pointers may treat a subsequently allocated Function as a
+		// GlobalVariable and corrupt its subclass data.  Probe the provider with
+		// live module globals instead.
+		for (GlobalVariable& global : _module->globals())
 		{
-			if (reg != nullptr && !reg->isThreadLocal())
+			if (abi->isRegister(&global) && !global.isThreadLocal())
 			{
-				reg->setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
+				global.setThreadLocalMode(
+						GlobalVariable::GeneralDynamicTLSModel);
 				changed = true;
 			}
 		}
