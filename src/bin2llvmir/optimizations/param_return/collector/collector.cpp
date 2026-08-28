@@ -34,6 +34,17 @@ Collector::Collector(
 
 void Collector::collectCallArgs(CallEntry* ce) const
 {
+	// Trusted fixed signatures with no parameters need no argument recovery.
+	// In particular, an x86 call immediately after callee-save PUSHes must not
+	// reinterpret those spills as outgoing arguments or erase them before the
+	// matching POPs are reconstructed.
+	if (ce->getBaseFunction()->isVoidarg()
+			&& !ce->getBaseFunction()->isVariadic())
+	{
+		ce->setArgStores({});
+		return;
+	}
+
 	if (_abi->getConfig()->getConfig().architecture.isX86_32())
 	{
 		collectX86CallArgs(ce);

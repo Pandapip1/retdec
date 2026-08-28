@@ -484,6 +484,107 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(ParamReturnTests, x86TrustedVoidArgsDoNotConsumeCalleeSavePushes)
+{
+	parseInput(R"(
+		@esi = global i32 0
+		@edi = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @GetLastError()
+		define i32 @caller() {
+			%stack_-4 = alloca i32
+			%stack_-8 = alloca i32
+			%saved_esi = load i32, i32* @esi
+			store volatile i64 4096, i64* @llvm2asm
+			store i32 %saved_esi, i32* %stack_-4
+			%saved_edi = load i32, i32* @edi
+			store volatile i64 4097, i64* @llvm2asm
+			store i32 %saved_edi, i32* %stack_-8
+			%result = call i32 @GetLastError()
+			%restore_edi = load i32, i32* %stack_-8
+			store i32 %restore_edi, i32* @edi
+			%restore_esi = load i32, i32* %stack_-4
+			store i32 %restore_esi, i32* @esi
+			ret i32 %result
+		}
+	)");
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto caller = retdec::common::Function("caller");
+	for (int offset : {-4, -8})
+	{
+		caller.locals.insert(retdec::common::Object(
+				"stack_" + std::to_string(offset),
+				retdec::common::Storage::onStack(offset)));
+	}
+	config.getConfig().functions.insert(caller);
+	auto getLastError = retdec::common::Function("GetLastError");
+	getLastError.setIsUserDefined();
+	getLastError.callingConvention.setIsVoidarg();
+	getLastError.returnType.setLlvmIr("i32");
+	config.getConfig().functions.insert(getLastError);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESI, module->getGlobalVariable("esi"));
+	abi->addRegister(X86_REG_EDI, module->getGlobalVariable("edi"));
+	AsmInstruction::setLlvmToAsmGlobalVariable(
+			module.get(), module->getGlobalVariable("llvm2asm"));
+	cs_insn pushes[2] = {};
+	for (auto& push : pushes)
+	{
+		push.id = X86_INS_PUSH;
+		push.size = 1;
+	}
+	unsigned push = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* marker = dyn_cast<StoreInst>(&instruction);
+		if (marker != nullptr && marker->getPointerOperand()
+				== module->getGlobalVariable("llvm2asm") && push < 2)
+		{
+			pushes[push].address = 0x1000 + push;
+			AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
+					= &pushes[push++];
+		}
+	}
+	ASSERT_EQ(2u, push);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto ltiTypeConfig = std::make_shared<ctypesparser::TypeConfig>();
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, ltiTypeConfig, image.getImage());
+
+	pass.runOnModuleCustom(
+			*module, &config, abi, demangler, &image, nullptr, lti);
+
+	auto* function = module->getFunction("GetLastError");
+	ASSERT_NE(nullptr, function);
+	EXPECT_EQ(0u, function->arg_size());
+	CallInst* recoveredCall = nullptr;
+	unsigned savedStackStores = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			if (call->getCalledFunction() == function)
+			{
+				recoveredCall = call;
+			}
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			savedStackStores += store->getPointerOperand()->getName()
+					.startswith("stack_");
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	EXPECT_EQ(0u, recoveredCall->arg_size());
+	EXPECT_EQ(2u, savedStackStores);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(ParamReturnTests, x86CalleeCleanupKeepsDecodedPushOrderPastOlderStackStores)
 {
 	parseInput(R"(
