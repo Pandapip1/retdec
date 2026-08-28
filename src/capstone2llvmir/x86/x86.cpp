@@ -4984,11 +4984,15 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFatan(cs_insn* i, cs_x86* xi, l
 
 	std::tie(op0, op1, top, idx) = loadOpFloatingBinaryTop(i, xi, irb);
 
-	llvm::Function* fnc = getPseudoAsmFunction(
-			i,
-			op0->getType(),
-			llvm::ArrayRef<llvm::Type*>{op1->getType(), op0->getType()});
-	auto* atan = irb.CreateCall(fnc, llvm::ArrayRef<llvm::Value*>{op1, op0});
+	auto* functionType = llvm::FunctionType::get(
+			op0->getType(), {op0->getType(), op1->getType()}, false);
+	auto* fpatan = llvm::InlineAsm::get(
+			functionType,
+			"fpatan",
+			"={st},0,{st(1)},~{fpsr},~{flags}",
+			true);
+	// FPATAN computes atan2(ST(1), ST(0)), stores it in ST(1), and pops.
+	auto* atan = irb.CreateCall(fpatan, {op0, op1});
 
 	storeX87DataReg(irb, idx, atan);
 
@@ -5038,14 +5042,11 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFnclex(cs_insn* i, cs_x86* xi, 
 {
 	EXPECT_IS_NULLARY(i, xi, irb);
 
-	llvm::Function* fnc = getPseudoAsmFunction(
-			i,
-			getDefaultType(),
-			llvm::ArrayRef<llvm::Type*>{});
-
-	auto* c = irb.CreateCall(fnc, llvm::ArrayRef<llvm::Value*>{});
-
-	storeRegister(X86_REG_FPSW, c, irb);
+	for (auto reg : {X87_REG_IE, X87_REG_DE, X87_REG_ZE, X87_REG_OE,
+			X87_REG_UE, X87_REG_PE, X87_REG_SF, X87_REG_ES, X87_REG_B})
+	{
+		storeRegister(reg, irb.getFalse(), irb);
+	}
 }
 
 /**
@@ -5339,14 +5340,32 @@ void Capstone2LlvmIrTranslatorX86_impl::translateFxam(cs_insn* i, cs_x86* xi, ll
 	EXPECT_IS_NULLARY(i, xi, irb);
 	std::tie(op0, top) = loadOpFloatingNullaryOrUnaryTop(i, xi, irb);
 
-	llvm::Function* fnc = getPseudoAsmFunction(
-		i,
-		getRegisterType(X86_REG_FPSW),
-		llvm::ArrayRef<llvm::Type*>{op0->getType()}
-	);
+	// Preserve the native classification of all x87 encodings, including
+	// denormals and unsupported values, and connect its condition codes to the
+	// individual virtual status registers consumed by FNSTSW.  Returning ST(0)
+	// as a tied output tells LLVM that the x87 stack value is preserved by FXAM.
+	auto* resultType = llvm::StructType::get(
+			_module->getContext(), {op0->getType(), irb.getInt16Ty()});
+	auto* functionType = llvm::FunctionType::get(
+			resultType, {op0->getType()}, false);
+	auto* fxam = llvm::InlineAsm::get(
+			functionType,
+			"fxam; fnstsw $1",
+			"={st},={ax},0,~{fpsr},~{flags}",
+			true);
+	auto* result = irb.CreateCall(fxam, {op0});
+	auto* status = irb.CreateExtractValue(result, 1);
 
-	auto* x86RegFpsw = irb.CreateCall(fnc, llvm::ArrayRef<llvm::Value*>{op0});
-	storeRegister(X86_REG_FPSW, x86RegFpsw, irb);
+	for (const auto& field : std::vector<std::pair<unsigned, unsigned>>{
+			{X87_REG_C0, 8},
+			{X87_REG_C1, 9},
+			{X87_REG_C2, 10},
+			{X87_REG_C3, 14}})
+	{
+		auto* bit = irb.CreateTrunc(
+				irb.CreateLShr(status, field.second), irb.getInt1Ty());
+		storeRegister(field.first, bit, irb);
+	}
 }
 
 /**

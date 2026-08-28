@@ -12758,24 +12758,15 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FSINCOS_compute)
 TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FPATAN_compute)
 {
 	ALL_MODES;
+	auto* translated = translate(assemble("fpatan"));
 
-	setRegisters({
-		{X87_REG_TOP, 0x1},
-		{X86_REG_ST2, 20.0},
-		{X86_REG_ST1, 10.0},
-	});
-
-	emulate("fpatan");
-
-	EXPECT_JUST_REGISTERS_LOADED({X87_REG_TOP, X86_REG_ST1, X86_REG_ST2});
-	EXPECT_JUST_REGISTERS_STORED({
-		{X87_REG_TOP, 0x2},
-		{X86_REG_ST2, ANY},
-	});
-	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_VALUES_CALLED({
-		{_module.getFunction("__asm_fpatan"), {20.0, 10.0}},
-	});
+	auto calls = getInlineAsmCalls(translated);
+	ASSERT_EQ(1, calls.size());
+	EXPECT_EQ("fpatan", calls[0]->getAsmString());
+	EXPECT_EQ("={st},0,{st(1)},~{fpsr},~{flags}",
+			calls[0]->getConstraintString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
+	EXPECT_EQ(nullptr, _module.getFunction("__asm_fpatan"));
 }
 
 //
@@ -13397,16 +13388,34 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FNCLEX)
 {
 	ALL_MODES;
 
+	setRegisters({
+		{X87_REG_IE, true},
+		{X87_REG_DE, true},
+		{X87_REG_ZE, true},
+		{X87_REG_OE, true},
+		{X87_REG_UE, true},
+		{X87_REG_PE, true},
+		{X87_REG_SF, true},
+		{X87_REG_ES, true},
+		{X87_REG_B, true},
+	});
+
 	emulate("fnclex");
 
 	EXPECT_NO_REGISTERS_LOADED();
 	EXPECT_JUST_REGISTERS_STORED({
-		{X86_REG_FPSW, ANY},
+		{X87_REG_IE, false},
+		{X87_REG_DE, false},
+		{X87_REG_ZE, false},
+		{X87_REG_OE, false},
+		{X87_REG_UE, false},
+		{X87_REG_PE, false},
+		{X87_REG_SF, false},
+		{X87_REG_ES, false},
+		{X87_REG_B, false},
 	});
 	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_JUST_VALUES_CALLED({
-		{_module.getFunction("__asm_fnclex"), {}},
-	});
+	EXPECT_NO_VALUE_CALLED();
 }
 
 //
@@ -13688,21 +13697,47 @@ TEST_P(Capstone2LlvmIrTranslatorX86Tests, X86_INS_FXAM)
 {
 	ALL_MODES;
 
-	setRegisters({
-		{X87_REG_TOP, 0x1},
-		{X86_REG_ST1, 17.0},
-	});
+	auto* translated = translate(assemble("fxam"));
 
-	emulate("fxam");
+	auto calls = getInlineAsmCalls(translated);
+	ASSERT_EQ(1, calls.size());
+	EXPECT_EQ("fxam; fnstsw $1", calls[0]->getAsmString());
+	EXPECT_EQ("={st},={ax},0,~{fpsr},~{flags}",
+			calls[0]->getConstraintString());
+	EXPECT_TRUE(calls[0]->hasSideEffects());
+	EXPECT_EQ(nullptr, _module.getFunction("__asm_fxam"));
 
-	EXPECT_JUST_REGISTERS_STORED({
-		{X86_REG_FPSW, ANY},
-	});
-	EXPECT_JUST_REGISTERS_LOADED({X86_REG_ST1, X87_REG_TOP});
-	EXPECT_NO_MEMORY_LOADED_STORED();
-	EXPECT_VALUES_CALLED({
-		{_module.getFunction("__asm_fxam"), {17.0}},
-	});
+	auto* resultType = llvm::dyn_cast<llvm::StructType>(
+			calls[0]->getFunctionType()->getReturnType());
+	ASSERT_NE(nullptr, resultType);
+	ASSERT_EQ(2, resultType->getNumElements());
+	EXPECT_TRUE(resultType->getElementType(0)->isX86_FP80Ty());
+	EXPECT_TRUE(resultType->getElementType(1)->isIntegerTy(16));
+
+	bool extractsStatus = false;
+	std::set<std::string> statusStores;
+	for (auto& instruction : llvm::instructions(translated))
+	{
+		if (auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(&instruction))
+		{
+			extractsStatus |= extract->getIndices()[0] == 1;
+		}
+		if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+		{
+			if (auto* global = llvm::dyn_cast<llvm::GlobalVariable>(
+					store->getPointerOperand()->stripPointerCasts()))
+			{
+				if (global->getName().startswith("fpu_stat_C"))
+				{
+					statusStores.insert(global->getName().str());
+				}
+			}
+		}
+	}
+	EXPECT_TRUE(extractsStatus);
+	EXPECT_EQ((std::set<std::string>{
+			"fpu_stat_C0", "fpu_stat_C1", "fpu_stat_C2", "fpu_stat_C3"}),
+			statusStores);
 }
 
 //
