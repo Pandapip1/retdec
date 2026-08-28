@@ -209,7 +209,44 @@ struct NativeObjectExtent
 	uint64_t size;
 };
 
-NativeObjectExtent getNativeObjectExtent(Module* module, Value* pointer)
+bool valueFeedsGuestAddressArithmetic(
+		Value* value,
+		SmallPtrSetImpl<Value*>& visited)
+{
+	if (!visited.insert(value).second)
+	{
+		return false;
+	}
+	for (User* user : value->users())
+	{
+		if (isa<GetElementPtrInst>(user))
+		{
+			return true;
+		}
+		if (auto* binary = dyn_cast<BinaryOperator>(user))
+		{
+			if (binary->getOpcode() == Instruction::Add
+					|| binary->getOpcode() == Instruction::Sub)
+			{
+				return true;
+			}
+		}
+		if (isa<CastInst>(user) || isa<PHINode>(user) || isa<SelectInst>(user))
+		{
+			if (valueFeedsGuestAddressArithmetic(user, visited))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+NativeObjectExtent getNativeObjectExtent(
+		Module* module,
+		Value* pointer,
+		Config* config = nullptr,
+		bool includeConfiguredSpan = false)
 {
 	auto& layout = module->getDataLayout();
 	Value* base = GetUnderlyingObject(pointer, layout);
@@ -235,6 +272,31 @@ NativeObjectExtent getNativeObjectExtent(Module* module, Value* pointer)
 		if (global->getValueType()->isSized())
 		{
 			size = layout.getTypeAllocSize(global->getValueType());
+		}
+		if (includeConfiguredSpan && config != nullptr)
+		{
+			// Type recovery may represent the first element of a PE array as a
+			// scalar global.  Pointer arithmetic is proof that the escape is an
+			// object base; the next configured global is its conservative bound.
+			auto address = config->getGlobalAddress(global);
+			if (address.isDefined() && address.getValue() <= UINT32_MAX)
+			{
+				uint64_t nextAddress = uint64_t{UINT32_MAX} + 1;
+				for (GlobalVariable& candidate : module->globals())
+				{
+					auto candidateAddress = config->getGlobalAddress(&candidate);
+					if (candidateAddress.isDefined()
+							&& candidateAddress.getValue() > address.getValue()
+							&& candidateAddress.getValue() < nextAddress)
+					{
+						nextAddress = candidateAddress.getValue();
+					}
+				}
+				if (nextAddress <= UINT32_MAX)
+				{
+					size = std::max(size, nextAddress - address.getValue());
+				}
+			}
 		}
 	}
 	return {base, std::min(size, uint64_t{UINT32_MAX})};
@@ -1197,6 +1259,9 @@ bool Pe32PointerBridge::run()
 	{
 		IRBuilder<> builder(escape);
 		Value* pointer = escape->getPointerOperand();
+		SmallPtrSet<Value*, 16> arithmeticUses;
+		const bool includeConfiguredSpan =
+				valueFeedsGuestAddressArithmetic(escape, arithmeticUses);
 		if (auto* cast = dyn_cast<AddrSpaceCastInst>(pointer))
 		{
 			auto* sourceType = llvm::cast<PointerType>(cast->getSrcTy());
@@ -1210,7 +1275,8 @@ bool Pe32PointerBridge::run()
 				continue;
 			}
 		}
-		auto extent = getNativeObjectExtent(_module, pointer);
+		auto extent = getNativeObjectExtent(
+				_module, pointer, _config, includeConfiguredSpan);
 		auto* call = builder.CreateCall(
 				hostToGuest,
 				{pointerAsBytePointer(builder, pointer),
@@ -1249,7 +1315,12 @@ bool Pe32PointerBridge::run()
 		if (sourceType->getAddressSpace() == 0)
 		{
 			Value* pointer = cast->getOperand(0);
-			auto extent = getNativeObjectExtent(_module, pointer);
+			SmallPtrSet<Value*, 16> arithmeticUses;
+			auto extent = getNativeObjectExtent(
+					_module,
+					pointer,
+					_config,
+					valueFeedsGuestAddressArithmetic(cast, arithmeticUses));
 			auto* guest = builder.CreateCall(
 					hostToGuest,
 					{pointerAsBytePointer(builder, pointer),

@@ -288,6 +288,68 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgeUsesConfiguredGlobalSpanForIndexedRecoveredScalar)
+{
+	parseInput(R"(
+		@recovered.array = global i32 0
+		@next.object = global i32 0
+		@plain.scalar = global i32 0
+		@plain.next = global i32 0
+		define void @func(i32 %index) {
+			%base = ptrtoint i32* @recovered.array to i32
+			%offset = mul i32 %index, 4
+			%address = add i32 %base, %offset
+			%pointer = inttoptr i32 %address to i32*
+			store i32 7, i32* %pointer, align 4
+			ret void
+		}
+		define i32* @plain() {
+			%guest = ptrtoint i32* @plain.scalar to i32
+			%pointer = inttoptr i32 %guest to i32*
+			ret i32* %pointer
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "recovered.array", 0x5137cec0);
+	addGlobalAddress(config, "next.object", 0x5137d010);
+	addGlobalAddress(config, "plain.scalar", 0x5137d020);
+	addGlobalAddress(config, "plain.next", 0x5137d120);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	CallInst* encode = nullptr;
+	for (Instruction& instruction : instructions(*module->getFunction("func")))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() != nullptr
+				&& call->getCalledFunction()->getName()
+						== "__retdec_pe32_host_to_guest")
+		{
+			encode = call;
+		}
+	}
+	ASSERT_NE(nullptr, encode);
+	EXPECT_EQ(module->getGlobalVariable("recovered.array"),
+			encode->getArgOperand(1)->stripPointerCasts());
+	auto* extent = cast<ConstantInt>(encode->getArgOperand(2));
+	EXPECT_EQ(0x150u, extent->getZExtValue());
+	CallInst* plainEncode = nullptr;
+	for (Instruction& instruction : instructions(*module->getFunction("plain")))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() != nullptr
+				&& call->getCalledFunction()->getName()
+						== "__retdec_pe32_host_to_guest")
+		{
+			plainEncode = call;
+		}
+	}
+	ASSERT_NE(nullptr, plainEncode);
+	auto* plainExtent = cast<ConstantInt>(plainEncode->getArgOperand(2));
+	EXPECT_EQ(4u, plainExtent->getZExtValue());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		bridgePipelineIsOptInAndNormalizedAfterPointerCellLegalization)
 {
 	std::vector<std::string> passes{
