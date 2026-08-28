@@ -538,6 +538,61 @@ bool localizePrivateFunctions(Module* module, Config* config)
 	return changed;
 }
 
+std::string encodePeFunctionNameForElf(StringRef name)
+{
+	if (!name.contains('@'))
+	{
+		return name.str();
+	}
+
+	static constexpr char hex[] = "0123456789abcdef";
+	std::string encoded = "__retdec_pe32_elf_";
+	encoded.reserve(encoded.size() + name.size() * 2);
+	for (unsigned char byte : name.bytes())
+	{
+		encoded.push_back(hex[byte >> 4]);
+		encoded.push_back(hex[byte & 0xf]);
+	}
+	return encoded;
+}
+
+bool legalizePeFunctionNamesForElf(Module* module, Config* config)
+{
+	bool changed = false;
+	for (Function& function : *module)
+	{
+		const std::string original = function.getName().str();
+		std::string encoded = encodePeFunctionNameForElf(original);
+		if (encoded == original)
+		{
+			continue;
+		}
+
+		// The full-byte encoding is injective for decorated input names.  Avoid
+		// colliding with an unrelated PE symbol that already uses the reserved
+		// prefix, while keeping the result stable for a fixed module order.
+		const std::string base = encoded;
+		for (unsigned collision = 1;
+				module->getNamedValue(encoded) != nullptr;
+				++collision)
+		{
+			encoded = base + "." + std::to_string(collision);
+		}
+
+		if (auto* configured = config->getConfigFunction(&function))
+		{
+			if (configured->getRealName().empty())
+			{
+				configured->setRealName(original);
+			}
+			config->renameFunction(configured, encoded);
+		}
+		function.setName(encoded);
+		changed = true;
+	}
+	return changed;
+}
+
 bool sameMemoryLocation(Value* first, Value* second)
 {
 	return first->stripPointerCasts() == second->stripPointerCasts();
@@ -904,6 +959,13 @@ bool Pe32PointerBridge::run()
 				|| (functionsNeedingMappings.count(&function) != 0
 						&& configuredGuestAddress(_config, &function) != 0);
 	}
+	// PE stdcall decorations use '@' (for example, helper@4).  GNU ELF treats
+	// that byte as symbol-version syntax, so even a correctly quoted LLVM name
+	// cannot be linked natively.  Rename every decorated PE function only at
+	// this final retargeting boundary; calls follow the LLVM value and config
+	// retains the original spelling as the real name.  Do this before the
+	// no-bridge-work return so name-only PE32 modules are legal ELF inputs too.
+	changed |= legalizePeFunctionNamesForElf(_module, _config);
 	if (hostEscapes.empty()
 			&& guestDereferences.empty()
 			&& addressSpaceCasts.empty()

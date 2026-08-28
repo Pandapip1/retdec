@@ -561,6 +561,60 @@ TEST_F(Pe32PointerLegalizationTests,
 }
 
 TEST_F(Pe32PointerLegalizationTests,
+		bridgeEncodesPeDecoratedFunctionNamesForElfNativeOutput)
+{
+	parseInput(R"(
+		declare i32 @"_RtlUnwind@16"(i32)
+		define i32 @"__seh_longjmp_unwind@4"(i32 %arg) {
+			%result = call i32 @"_RtlUnwind@16"(i32 %arg)
+			ret i32 %result
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	auto* root = module->getFunction("__seh_longjmp_unwind@4");
+	addFunctionRange(config, root->getName(), 0x401000, 0x401020);
+	config.getConfig().parameters.selectedRanges.insert(
+			retdec::common::AddressRange(0x401000, 0x401020));
+
+	EXPECT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	EXPECT_EQ(nullptr, module->getFunction("__seh_longjmp_unwind@4"));
+	EXPECT_EQ(nullptr, module->getFunction("_RtlUnwind@16"));
+
+	auto* encodedRoot = module->getFunction(
+			"__retdec_pe32_elf_5f5f7365685f6c6f6e676a6d705f756e77696e644034");
+	auto* encodedImport = module->getFunction(
+			"__retdec_pe32_elf_5f52746c556e77696e64403136");
+	ASSERT_NE(nullptr, encodedRoot);
+	ASSERT_NE(nullptr, encodedImport);
+	EXPECT_NE(nullptr, module->getFunction(
+			(encodedRoot->getName() + ".retdec_native").str()));
+	for (Function& function : *module)
+	{
+		EXPECT_EQ(StringRef::npos, function.getName().find('@'));
+	}
+	auto* configured = config.getConfigFunction(encodedRoot);
+	ASSERT_NE(nullptr, configured);
+	EXPECT_EQ("__seh_longjmp_unwind@4", configured->getRealName());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeEncodesDecoratedDeclarationWithoutOtherBridgeWork)
+{
+	parseInput(R"(
+		declare i32 @"_RtlUnwind@16"(i32)
+	)");
+	auto config = createConfig("pe32", 32);
+
+	EXPECT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	EXPECT_EQ(nullptr, module->getFunction("_RtlUnwind@16"));
+	EXPECT_NE(nullptr, module->getFunction(
+			"__retdec_pe32_elf_5f52746c556e77696e64403136"));
+	EXPECT_EQ(nullptr, module->getFunction("__retdec_pe32_host_to_guest"));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
 		bridgeInitializesIntegerAndPointerRelocationCellsAsFourByteGuests)
 {
 	parseInput(R"(
