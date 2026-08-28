@@ -95,14 +95,79 @@ bool isRegisterLocalizationAlloca(AllocaInst* alloca, Abi* abi)
 	return false;
 }
 
-LoadInst* getStackPointerLoadFromPopAddress(Value* value, Abi* abi)
+AllocaInst* getStackFrameAlloca(Value* value)
 {
-	value = llvm_utils::skipCasts(value);
+	while (true)
+	{
+		if (auto* cast = dyn_cast<CastInst>(value))
+		{
+			value = cast->getOperand(0);
+			continue;
+		}
+		if (auto* gep = dyn_cast<GetElementPtrInst>(value))
+		{
+			value = gep->getPointerOperand();
+			continue;
+		}
+		break;
+	}
+
+	auto* alloca = dyn_cast<AllocaInst>(value);
+	return alloca != nullptr
+			&& alloca->getMetadata(STACK_FRAME_START_METADATA) != nullptr
+		? alloca
+		: nullptr;
+}
+
+bool isReconstructedPopAddress(
+		Value* value,
+		Abi* abi,
+		std::set<Value*>& visiting)
+{
+	if (!visiting.insert(value).second)
+	{
+		return false;
+	}
+	auto finish = [&visiting, value](bool result)
+	{
+		visiting.erase(value);
+		return result;
+	};
+
 	if (auto* load = dyn_cast<LoadInst>(value))
 	{
-		return abi->isStackPointerRegister(load->getPointerOperand())
-				? load
-				: nullptr;
+		if (abi->isStackPointerRegister(load->getPointerOperand()))
+		{
+			return finish(true);
+		}
+		return finish(false);
+	}
+	if (auto* ptrToInt = dyn_cast<PtrToIntInst>(value))
+	{
+		return finish(getStackFrameAlloca(ptrToInt->getPointerOperand()) != nullptr);
+	}
+	if (auto* cast = dyn_cast<CastInst>(value))
+	{
+		return finish(isReconstructedPopAddress(
+				cast->getOperand(0), abi, visiting));
+	}
+	if (auto* phi = dyn_cast<PHINode>(value))
+	{
+		for (Value* incoming : phi->incoming_values())
+		{
+			if (!isReconstructedPopAddress(incoming, abi, visiting))
+			{
+				return finish(false);
+			}
+		}
+		return finish(phi->getNumIncomingValues() != 0);
+	}
+	if (auto* select = dyn_cast<SelectInst>(value))
+	{
+		return finish(isReconstructedPopAddress(
+				select->getTrueValue(), abi, visiting)
+				&& isReconstructedPopAddress(
+						select->getFalseValue(), abi, visiting));
 	}
 
 	auto* operation = dyn_cast<BinaryOperator>(value);
@@ -110,7 +175,7 @@ LoadInst* getStackPointerLoadFromPopAddress(Value* value, Abi* abi)
 			|| (operation->getOpcode() != Instruction::Add
 					&& operation->getOpcode() != Instruction::Sub))
 	{
-		return nullptr;
+		return finish(false);
 	}
 
 	// A sequence of decoded POPs may leave later restore loads addressed as
@@ -119,14 +184,16 @@ LoadInst* getStackPointerLoadFromPopAddress(Value* value, Abi* abi)
 	// so unrelated values derived from ESP remain semantic.
 	if (isa<ConstantInt>(operation->getOperand(1)))
 	{
-		return getStackPointerLoadFromPopAddress(operation->getOperand(0), abi);
+		return finish(isReconstructedPopAddress(
+				operation->getOperand(0), abi, visiting));
 	}
 	if (operation->getOpcode() == Instruction::Add
 			&& isa<ConstantInt>(operation->getOperand(0)))
 	{
-		return getStackPointerLoadFromPopAddress(operation->getOperand(1), abi);
+		return finish(isReconstructedPopAddress(
+				operation->getOperand(1), abi, visiting));
 	}
-	return nullptr;
+	return finish(false);
 }
 
 struct StackAddressRange
@@ -870,11 +937,12 @@ bool StackPointerOpsRemove::removeDeadRegisterRestorePops()
 				continue;
 			}
 			auto* address = dyn_cast<IntToPtrInst>(popped->getPointerOperand());
-			auto* stackPointer = address == nullptr
-					? nullptr
-					: getStackPointerLoadFromPopAddress(
-							address->getOperand(0), _abi);
-			if (stackPointer == nullptr)
+			std::set<Value*> visiting;
+			if (address == nullptr
+					|| !isReconstructedPopAddress(
+							address->getOperand(0),
+							_abi,
+							visiting))
 			{
 				continue;
 			}

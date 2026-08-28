@@ -368,6 +368,84 @@ TEST_F(StackPointerOpsRemoveTests,
 	EXPECT_FALSE(hasLaterAddress);
 }
 
+TEST_F(StackPointerOpsRemoveTests,
+		removesRegisterRestorePopMergedByPhiAcrossEarlyReturnPaths)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@esi = global i32 0
+		define i32 @func(i1 %early) {
+		entry:
+			%stack_frame = alloca [44 x i8], align 4, !retdec.stack.frame.start !0
+			%frame_base = ptrtoint [44 x i8]* %stack_frame to i32
+			br i1 %early, label %early_return, label %loop_exit
+		early_return:
+			br label %return
+		loop_exit:
+			%synthetic_stack = load i32, i32* @esp
+			br label %return
+		return:
+			%stack_address_value = phi i32 [ %frame_base, %early_return ], [ %synthetic_stack, %loop_exit ]
+			%stack_address = inttoptr i32 %stack_address_value to i32*
+			%popped = load i32, i32* %stack_address
+			store i32 %popped, i32* @esi
+			ret i32 0
+		}
+		!0 = !{i64 -36}
+	)");
+	auto c = Config::empty(module.get());
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+	abi.addRegister(X86_REG_ESI, getGlobalByName("esi"));
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
+	bool loadsSyntheticStackPointer = false;
+	bool hasStackAddressPhi = false;
+	for (auto& block : *module->getFunction("func"))
+	for (auto& instruction : block)
+	{
+		hasStackAddressPhi |= instruction.getName() == "stack_address_value";
+		if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+		{
+			loadsSyntheticStackPointer |=
+					load->getPointerOperand() == module->getGlobalVariable("esp");
+		}
+	}
+	EXPECT_FALSE(loadsSyntheticStackPointer);
+	EXPECT_FALSE(hasStackAddressPhi);
+}
+
+TEST_F(StackPointerOpsRemoveTests,
+		keepsRegisterRestorePopWithUnknownPhiAddress)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@esi = global i32 0
+		define i32 @func(i1 %use_unknown, i32 %unknown) {
+		entry:
+			%synthetic_stack = load i32, i32* @esp
+			br i1 %use_unknown, label %unknown_path, label %stack_path
+		unknown_path:
+			br label %return
+		stack_path:
+			br label %return
+		return:
+			%stack_address_value = phi i32 [ %unknown, %unknown_path ], [ %synthetic_stack, %stack_path ]
+			%stack_address = inttoptr i32 %stack_address_value to i32*
+			%popped = load i32, i32* %stack_address
+			store i32 %popped, i32* @esi
+			ret i32 0
+		}
+	)");
+	auto c = Config::empty(module.get());
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+	abi.addRegister(X86_REG_ESI, getGlobalByName("esi"));
+
+	EXPECT_FALSE(pass.runOnModuleCustom(*module, &abi));
+	EXPECT_NE(nullptr, getValueByName("popped"));
+}
+
 TEST_F(StackPointerOpsRemoveTests, keepsPopValueThatRemainsSemanticallyUsed)
 {
 	parseInput(R"(
