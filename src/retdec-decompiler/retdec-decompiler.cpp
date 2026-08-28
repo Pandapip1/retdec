@@ -4,6 +4,7 @@
  * @copyright (c) 2020 Avast Software, licensed under the MIT license
  */
 
+#include <algorithm>
 #include <fstream>
 #include <future>
 #include <chrono>
@@ -391,6 +392,20 @@ void ProgramOptions::loadOption(std::list<std::string>::iterator& i)
 	{
 		params.setIsPe32PointerBridge(true);
 	}
+	else if (isParam(i, "", "--stop-after"))
+	{
+		auto phase = getParamOrDie(i);
+		if (phase != "bin2llvmir")
+		{
+			throw std::runtime_error(
+					"[--stop-after] unsupported phase: " + phase);
+		}
+		auto firstBackendPass = std::find(
+				params.llvmPasses.begin(),
+				params.llvmPasses.end(),
+				"retdec-llvmir2hll");
+		params.llvmPasses.erase(firstBackendPass, params.llvmPasses.end());
+	}
 	else if (isParam(i, "", "--backend-disabled-opts"))
 	{
 		params.setBackendDisabledOpts(getParamOrDie(i));
@@ -629,6 +644,7 @@ General arguments:
 	[--config] Specify JSON decompilation configuration file.
 	[--disable-static-code-detection] Prevents detection of statically linked code.
 	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked.
+	[--stop-after bin2llvmir] Stops after emitting backend LLVM IR and bitcode, without running LLVM IR to HLL conversion.
 Selective decompilation arguments:
 	[--select-ranges RANGES] Specify a comma separated list of ranges to decompile (example: 0x100-0x200,0x300-0x400,0x500-0x600).
 	[--select-functions FUNCS] Specify a comma separated list of functions to decompile (example: fnc1,fnc2,fnc3).
