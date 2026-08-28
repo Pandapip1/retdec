@@ -295,6 +295,7 @@ void CallEntry::setFormatString(const std::string &fmt)
 void CallEntry::setArgStores(std::vector<llvm::StoreInst*>&& stores)
 {
 	_argStores = std::move(stores);
+	_directArgOrigins.clear();
 
 	if (_directArgStores.empty() && !_preserveNativeStackOrder)
 	{
@@ -310,8 +311,16 @@ void CallEntry::setArgStores(std::vector<llvm::StoreInst*>&& stores)
 	_args.clear();
 	for (auto* store : _argStores)
 	{
-		_args.push_back(_directArgStores.count(store) != 0
-				? store->getValueOperand() : store->getPointerOperand());
+		if (_directArgStores.count(store) != 0)
+		{
+			auto* value = store->getValueOperand();
+			_args.push_back(value);
+			_directArgOrigins.emplace_back(value, value);
+		}
+		else
+		{
+			_args.push_back(store->getPointerOperand());
+		}
 	}
 }
 
@@ -347,6 +356,16 @@ void CallEntry::setArgs(std::vector<Value*>&& args)
 			it = _directArgStores.erase(it);
 		}
 	}
+	_directArgOrigins.erase(
+			std::remove_if(
+					_directArgOrigins.begin(),
+					_directArgOrigins.end(),
+					[&args](const auto& origin)
+					{
+						return std::find(args.begin(), args.end(), origin.first)
+										== args.end();
+					}),
+			_directArgOrigins.end());
 	for (auto it = _provenStackArgStores.begin();
 			it != _provenStackArgStores.end(); )
 	{
@@ -462,13 +481,19 @@ const std::vector<StoreInst*>& CallEntry::obsoleteStackCleanupMarkers() const
 
 bool CallEntry::isDirectArgument(const Value* value) const
 {
-	return std::any_of(
-		_directArgStores.begin(),
-		_directArgStores.end(),
-		[value](const StoreInst* store)
+	return getDirectArgument(value) != nullptr;
+}
+
+Value* CallEntry::getDirectArgument(const Value* value) const
+{
+	for (const auto& origin : _directArgOrigins)
+	{
+		if (origin.first == value)
 		{
-			return store->getValueOperand() == value;
-		});
+			return origin.second;
+		}
+	}
+	return nullptr;
 }
 
 bool CallEntry::preservesNativeStackOrder() const

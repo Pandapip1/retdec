@@ -1276,8 +1276,9 @@ std::map<CallInst*, std::vector<Value*>> ParamReturn::fetchLoadsOfCalls(
 				continue;
 			}
 
-			Value* l = e.isDirectArgument(*aIt)
-					? *aIt : new LoadInst(*aIt, "", call);
+			auto* direct = e.getDirectArgument(*aIt);
+			Value* l = direct != nullptr
+					? direct : new LoadInst(*aIt, "", call);
 
 			if (tIt != types.end())
 			{

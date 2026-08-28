@@ -8,12 +8,14 @@
 #define RETDEC_BIN2LLVMIR_OPTIMIZATIONS_PARAM_RETURN_DATA_ENTRIES_H
 
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "retdec/bin2llvmir/providers/calling_convention/calling_convention.h"
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/ValueHandle.h>
 
 namespace retdec {
 namespace bin2llvmir {
@@ -145,6 +147,7 @@ class CallEntry : public CallableEntry
 		const std::set<llvm::StoreInst*>& provenStackArgStores() const;
 		const std::set<llvm::StoreInst*>& obsoleteStackArgStores() const;
 		const std::vector<llvm::StoreInst*>& obsoleteStackCleanupMarkers() const;
+		llvm::Value* getDirectArgument(const llvm::Value* value) const;
 		bool isDirectArgument(const llvm::Value* value) const;
 		bool preservesNativeStackOrder() const;
 
@@ -158,6 +161,7 @@ class CallEntry : public CallableEntry
 		std::vector<llvm::Value*> _retValues;
 		std::vector<llvm::StoreInst*> _argStores;
 		std::set<llvm::StoreInst*> _directArgStores;
+		std::vector<std::pair<llvm::Value*, llvm::WeakTrackingVH>> _directArgOrigins;
 		std::set<llvm::StoreInst*> _provenStackArgStores;
 		std::set<llvm::StoreInst*> _obsoleteStackArgStores;
 		std::vector<llvm::StoreInst*> _obsoleteStackCleanupMarkers;

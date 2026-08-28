@@ -383,18 +383,21 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 			%stack_-8 = alloca i32*
 			%stack_-12 = alloca i32
 			%stack_-16 = alloca i32
+			%stack_-20 = alloca i32
 			store volatile i64 4096, i64* @llvm2asm
-			store i32* @destination, i32** %stack_-4
+			store i32 77, i32* %stack_-20
 			store volatile i64 4097, i64* @llvm2asm
-			store i32* %local, i32** %stack_-8
+			store i32* @destination, i32** %stack_-4
 			store volatile i64 4098, i64* @llvm2asm
-			store i32 0, i32* %stack_-12
+			store i32* %local, i32** %stack_-8
 			store volatile i64 4099, i64* @llvm2asm
-			store i32 1324, i32* %stack_-16
+			store i32 0, i32* %stack_-12
 			store volatile i64 4100, i64* @llvm2asm
+			store i32 1324, i32* %stack_-16
+			store volatile i64 4101, i64* @llvm2asm
 			%result = call i32 @consume()
 			%current = load i32, i32* @esp
-			%clean = add i32 %current, 16
+			%clean = add i32 %current, 20
 			store i32 %clean, i32* @esp
 			ret i32 %result
 		}
@@ -403,7 +406,7 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	config.getConfig().architecture.setIsX86();
 	config.getConfig().architecture.setBitSize(32);
 	auto caller = retdec::common::Function("caller");
-	for (int offset : {-4, -8, -12, -16})
+	for (int offset : {-4, -8, -12, -16, -20})
 	{
 		caller.locals.insert(retdec::common::Object(
 				"stack_" + std::to_string(offset),
@@ -428,7 +431,7 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
 	AsmInstruction::setLlvmToAsmGlobalVariable(
 			module.get(), module->getGlobalVariable("llvm2asm"));
-	cs_insn pushes[4] = {};
+	cs_insn pushes[5] = {};
 	for (auto& push : pushes)
 	{
 		push.id = X86_INS_PUSH;
@@ -439,14 +442,14 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	{
 		auto* marker = dyn_cast<StoreInst>(&instruction);
 		if (marker != nullptr && marker->getPointerOperand()
-				== module->getGlobalVariable("llvm2asm") && push < 4)
+				== module->getGlobalVariable("llvm2asm") && push < 5)
 		{
 			pushes[push].address = 0x1000 + push;
 			AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
 					= &pushes[push++];
 		}
 	}
-	ASSERT_EQ(4u, push);
+	ASSERT_EQ(5u, push);
 	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
 	auto* demangler = DemanglerProvider::addDemangler(
 			module.get(), &config, std::move(typeConfig));
@@ -479,6 +482,71 @@ TEST_F(ParamReturnTests, x86DecodedPushValuesSurviveConfiguredStackStoreCleanup)
 	EXPECT_EQ(module->getGlobalVariable("destination"),
 			recoveredCall->getArgOperand(3));
 	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
+{
+	parseInput(R"(
+		declare void @consume()
+		define void @caller() {
+			%kept = add i32 1, 2
+			%filtered = add i32 3, 4
+			%kept_slot = alloca i32
+			%filtered_slot = alloca i32
+			store i32 %filtered, i32* %filtered_slot
+			store i32 %kept, i32* %kept_slot
+			call void @consume()
+			ret void
+		}
+	)");
+	auto* caller = module->getFunction("caller");
+	auto* kept = getValueByName("kept");
+	auto* filtered = getValueByName("filtered");
+	StoreInst* keptStore = nullptr;
+	StoreInst* filteredStore = nullptr;
+	CallInst* call = nullptr;
+	for (auto& instruction : instructions(caller))
+	{
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			if (store->getValueOperand() == kept)
+			{
+				keptStore = store;
+			}
+			else if (store->getValueOperand() == filtered)
+			{
+				filteredStore = store;
+			}
+		}
+		else if (auto* candidate = dyn_cast<CallInst>(&instruction))
+		{
+			call = candidate;
+		}
+	}
+	ASSERT_NE(nullptr, keptStore);
+	ASSERT_NE(nullptr, filteredStore);
+	ASSERT_NE(nullptr, call);
+
+	CallEntry entry(call);
+	entry.addDirectArgStore(keptStore);
+	entry.addDirectArgStore(filteredStore);
+	entry.addProvenStackArgStore(keptStore);
+	entry.addProvenStackArgStore(filteredStore);
+	entry.setArgStores({filteredStore, keptStore});
+	entry.setArgs({kept});
+	ASSERT_EQ(1u, entry.directArgStores().size());
+	ASSERT_EQ(1u, entry.provenStackArgStores().size());
+
+	auto* replacement = BinaryOperator::CreateAdd(
+			ConstantInt::get(Type::getInt32Ty(context), 5),
+			ConstantInt::get(Type::getInt32Ty(context), 6),
+			"replacement", keptStore);
+	kept->replaceAllUsesWith(replacement);
+	cast<Instruction>(kept)->eraseFromParent();
+	keptStore->eraseFromParent();
+
+	EXPECT_EQ(replacement, entry.getDirectArgument(kept));
+	EXPECT_TRUE(entry.isDirectArgument(kept));
 }
 
 TEST_F(ParamReturnTests, x86CallerCleanupPreservesHiddenTrailingStackSlot)
