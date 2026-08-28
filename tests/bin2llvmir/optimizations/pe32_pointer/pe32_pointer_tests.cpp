@@ -14,7 +14,9 @@
 
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
+#include "retdec/bin2llvmir/providers/abi/x86.h"
 #include "retdec/bin2llvmir/providers/fileimage.h"
+#include "retdec/capstone2llvmir/x86/x86_defs.h"
 #include "retdec/fileformat/file_format/pe/pe_format.h"
 
 using namespace llvm;
@@ -128,6 +130,36 @@ class Pe32PointerLegalizationTests: public LlvmIrTests
 		Pe32PointerLegalization pass;
 		Pe32PointerBridge bridge;
 };
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeMakesArchitecturalCpuStateThreadLocalForNativeConcurrency)
+{
+	parseInput(R"(
+		@eax = internal global i32 0
+		@cf = internal global i1 false
+		@fpu_stat_TOP = internal global i3 0
+		@st0 = internal global x86_fp80 0xK00000000000000000000
+		@ordinary_pe_global = global i32 0
+	)");
+	auto config = createConfig("pe32", 32);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	ASSERT_NE(nullptr, abi);
+	abi->addRegister(X86_REG_EAX, getGlobalByName("eax"));
+	abi->addRegister(X86_REG_EFLAGS, getGlobalByName("cf"));
+	abi->addRegister(X87_REG_TOP, getGlobalByName("fpu_stat_TOP"));
+	abi->addRegister(X86_REG_ST0, getGlobalByName("st0"));
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	for (StringRef name : {"eax", "cf", "fpu_stat_TOP", "st0"})
+	{
+		auto* reg = module->getGlobalVariable(name, true);
+		ASSERT_NE(nullptr, reg);
+		EXPECT_TRUE(reg->isThreadLocal()) << name.str();
+		EXPECT_EQ(GlobalVariable::GeneralDynamicTLSModel,
+				reg->getThreadLocalMode()) << name.str();
+	}
+	EXPECT_FALSE(module->getGlobalVariable("ordinary_pe_global")->isThreadLocal());
+}
 
 TEST_F(Pe32PointerLegalizationTests,
 		legalizesAdjacentGlobalAndStackPointerCells)

@@ -20,6 +20,7 @@
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
+#include "retdec/bin2llvmir/providers/abi/abi.h"
 #include "retdec/bin2llvmir/providers/fileimage.h"
 #include "retdec/fileformat/file_format/pe/pe_format.h"
 
@@ -1017,9 +1018,25 @@ bool Pe32PointerBridge::run()
 
 	auto& context = _module->getContext();
 	auto* int32 = Type::getInt32Ty(context);
+	bool changed = false;
+	if (auto* abi = AbiProvider::getAbi(_module))
+	{
+		// Architectural state belongs to a guest CPU thread.  Native PE32
+		// retargeting may execute lifted task and callback entry points on
+		// different host threads, so process-global register, flag, and x87
+		// storage allows one thread to corrupt another thread's machine state.
+		for (GlobalVariable* reg : abi->getRegisters())
+		{
+			if (reg != nullptr && !reg->isThreadLocal())
+			{
+				reg->setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
+				changed = true;
+			}
+		}
+	}
 	auto relocationTargetFunctions = functionsReferencedByPeBaseRelocations(
 			_module, _config);
-	bool changed = localizePrivateFunctions(_module, _config);
+	changed |= localizePrivateFunctions(_module, _config);
 	// Record this before generating the constructor: passing a function to the
 	// registration runtime is itself address-taking and must not make every
 	// decoded direct-call-only function look like a required indirect target.
