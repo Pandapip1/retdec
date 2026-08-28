@@ -687,7 +687,7 @@ bool sameMemoryLocation(Value* first, Value* second)
 	return first->stripPointerCasts() == second->stripPointerCasts();
 }
 
-bool valueDependsOnArgument(
+bool valueCarriesPointerArgument(
 		Value* value,
 		Argument* argument,
 		SmallPtrSetImpl<Value*>& visited)
@@ -714,7 +714,7 @@ bool valueDependsOnArgument(
 			if (store != nullptr
 					&& sameMemoryLocation(
 							store->getPointerOperand(), load->getPointerOperand())
-					&& valueDependsOnArgument(
+					&& valueCarriesPointerArgument(
 							store->getValueOperand(), argument, visited))
 			{
 				return true;
@@ -722,15 +722,40 @@ bool valueDependsOnArgument(
 		}
 		return false;
 	}
-	if (isa<CallBase>(instruction) || isa<StoreInst>(instruction))
+	if (auto* cast = dyn_cast<CastInst>(instruction))
 	{
-		return false;
+		return valueCarriesPointerArgument(
+				cast->getOperand(0), argument, visited);
 	}
-	for (Value* operand : instruction->operands())
+	if (auto* binary = dyn_cast<BinaryOperator>(instruction))
 	{
-		if (valueDependsOnArgument(operand, argument, visited))
+		if (binary->getOpcode() != Instruction::Add
+				&& binary->getOpcode() != Instruction::Sub)
 		{
-			return true;
+			return false;
+		}
+		return valueCarriesPointerArgument(
+					binary->getOperand(0), argument, visited)
+				|| valueCarriesPointerArgument(
+					binary->getOperand(1), argument, visited);
+	}
+	if (auto* select = dyn_cast<SelectInst>(instruction))
+	{
+		// The condition controls which address is selected, but it is not part
+		// of either pointer value and must remain a scalar native parameter.
+		return valueCarriesPointerArgument(
+					select->getTrueValue(), argument, visited)
+				|| valueCarriesPointerArgument(
+					select->getFalseValue(), argument, visited);
+	}
+	if (auto* phi = dyn_cast<PHINode>(instruction))
+	{
+		for (Value* incoming : phi->incoming_values())
+		{
+			if (valueCarriesPointerArgument(incoming, argument, visited))
+			{
+				return true;
+			}
 		}
 	}
 	return false;
@@ -758,7 +783,7 @@ std::vector<NativeEntryWrapper> findNativeEntryWrappers(
 				continue;
 			}
 			SmallPtrSet<Value*, 32> visited;
-			if (valueDependsOnArgument(
+			if (valueCarriesPointerArgument(
 						dereference->getOperand(0), &argument, visited))
 			{
 				pointerArguments[function].insert(argument.getArgNo());
@@ -803,7 +828,7 @@ std::vector<NativeEntryWrapper> findNativeEntryWrappers(
 							continue;
 						}
 						SmallPtrSet<Value*, 32> visited;
-						if (valueDependsOnArgument(
+						if (valueCarriesPointerArgument(
 									call->getArgOperand(calleeArgument),
 									&callerArgument,
 									visited))

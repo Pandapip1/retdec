@@ -867,11 +867,15 @@ TEST_F(Pe32PointerLegalizationTests,
 			%value = load i32, i32* %pointer, align 4
 			ret i32 %value
 		}
-		define i32 @entry(i32 %scalar, i32 %direct, i32 %forwarded) {
-			%direct.pointer = inttoptr i32 %direct to i32*
+		define i32 @entry(i32 %scalar, i32 %direct, i32 %forwarded, i32 %control) {
+			%scaled.index = mul i32 %scalar, 32
+			%direct.address = add i32 %direct, %scaled.index
+			%direct.pointer = inttoptr i32 %direct.address to i32*
 			%direct.value = load i32, i32* %direct.pointer, align 4
 			%derived = add i32 %forwarded, 4
-			%forwarded.value = call i32 @helper(i32 %derived)
+			%enabled = icmp ne i32 %control, 0
+			%selected = select i1 %enabled, i32 %derived, i32 0
+			%forwarded.value = call i32 @helper(i32 %selected)
 			%sum = add i32 %direct.value, %forwarded.value
 			%result = add i32 %sum, %scalar
 			ret i32 %result
@@ -904,9 +908,11 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(0)->isIntegerTy(32));
 	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(1)->isIntegerTy(32));
 	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(2)->isIntegerTy(32));
+	EXPECT_TRUE(guestEntry->getFunctionType()->getParamType(3)->isIntegerTy(32));
 	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(0)->isIntegerTy(32));
 	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(1)->isPointerTy());
 	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(2)->isPointerTy());
+	EXPECT_TRUE(nativeEntry->getFunctionType()->getParamType(3)->isIntegerTy(32));
 	EXPECT_EQ(nullptr, module->getFunction("helper.retdec_native"));
 	EXPECT_EQ(nullptr, module->getFunction("private.retdec_native"));
 	auto* scalarEntry = module->getFunction("scalar.entry.retdec_native");
@@ -941,6 +947,7 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_TRUE(guestCall->getArgOperand(0)->getType()->isIntegerTy(32));
 	EXPECT_TRUE(guestCall->getArgOperand(1)->getType()->isIntegerTy(32));
 	EXPECT_TRUE(guestCall->getArgOperand(2)->getType()->isIntegerTy(32));
+	EXPECT_TRUE(guestCall->getArgOperand(3)->getType()->isIntegerTy(32));
 	unsigned scalarEncodes = 0;
 	for (Instruction& instruction : instructions(scalarEntry))
 	{
