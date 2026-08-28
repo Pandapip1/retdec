@@ -1202,7 +1202,12 @@ bool Pe32PointerBridge::run()
 		{
 			continue;
 		}
-		auto extent = getNativeObjectExtent(_module, &global);
+		SmallPtrSet<Value*, 16> arithmeticUses;
+		auto extent = getNativeObjectExtent(
+				_module,
+				&global,
+				_config,
+				valueFeedsGuestAddressArithmetic(&global, arithmeticUses));
 		initializerBuilder.CreateCall(
 				registerObject,
 				{pointerAsBytePointer(initializerBuilder, &global),

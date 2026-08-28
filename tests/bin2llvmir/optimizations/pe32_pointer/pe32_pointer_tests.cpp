@@ -332,6 +332,36 @@ TEST_F(Pe32PointerLegalizationTests,
 			encode->getArgOperand(1)->stripPointerCasts());
 	auto* extent = cast<ConstantInt>(encode->getArgOperand(2));
 	EXPECT_EQ(0x150u, extent->getZExtValue());
+	CallInst* recoveredRegistration = nullptr;
+	CallInst* plainRegistration = nullptr;
+	for (Instruction& instruction : instructions(
+			*module->getFunction("__retdec_pe32_initialize_mappings")))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call == nullptr || call->getCalledFunction() == nullptr
+				|| call->getCalledFunction()->getName()
+						!= "retdec_pe32_register_host_object")
+		{
+			continue;
+		}
+		auto* object = call->getArgOperand(0)->stripPointerCasts();
+		if (object == module->getGlobalVariable("recovered.array"))
+		{
+			recoveredRegistration = call;
+		}
+		else if (object == module->getGlobalVariable("plain.scalar"))
+		{
+			plainRegistration = call;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredRegistration);
+	auto* recoveredRegisteredExtent = cast<ConstantInt>(
+			recoveredRegistration->getArgOperand(1));
+	EXPECT_EQ(0x150u, recoveredRegisteredExtent->getZExtValue());
+	ASSERT_NE(nullptr, plainRegistration);
+	auto* plainRegisteredExtent = cast<ConstantInt>(
+			plainRegistration->getArgOperand(1));
+	EXPECT_EQ(4u, plainRegisteredExtent->getZExtValue());
 	CallInst* plainEncode = nullptr;
 	for (Instruction& instruction : instructions(*module->getFunction("plain")))
 	{
