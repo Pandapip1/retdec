@@ -234,6 +234,7 @@ TEST_F(Pe32PointerLegalizationTests,
 	auto* function = module->getFunction("func");
 	CallInst* encode = nullptr;
 	CallInst* decode = nullptr;
+	CallInst* unregister = nullptr;
 	for (Instruction& instruction : instructions(*function))
 	{
 		if (auto* call = dyn_cast<CallInst>(&instruction))
@@ -250,6 +251,12 @@ TEST_F(Pe32PointerLegalizationTests,
 			{
 				decode = call;
 			}
+			else if (call->getCalledFunction() != nullptr
+					&& call->getCalledFunction()->getName()
+							== "retdec_pe32_unregister_host_object")
+			{
+				unregister = call;
+			}
 		}
 		if (auto* cast = dyn_cast<PtrToIntInst>(&instruction))
 		{
@@ -265,8 +272,12 @@ TEST_F(Pe32PointerLegalizationTests,
 	}
 	ASSERT_NE(nullptr, encode);
 	ASSERT_NE(nullptr, decode);
+	ASSERT_NE(nullptr, unregister);
 	EXPECT_EQ(getValueByName("frame"),
 			encode->getArgOperand(1)->stripPointerCasts());
+	EXPECT_EQ(getValueByName("frame"),
+			unregister->getArgOperand(0)->stripPointerCasts());
+	EXPECT_EQ(function->back().getTerminator()->getPrevNode(), unregister);
 	auto* extent = cast<ConstantInt>(encode->getArgOperand(2));
 	EXPECT_EQ(16u, extent->getZExtValue());
 	EXPECT_FALSE(verifyModule(*module, &errs()));
@@ -285,6 +296,46 @@ TEST_F(Pe32PointerLegalizationTests,
 	EXPECT_FALSE(bridge.runOnModuleCustom(*module, &config));
 	EXPECT_EQ(nullptr, module->getFunction("__retdec_pe32_host_to_guest"));
 	EXPECT_EQ(nullptr, module->getFunction("__retdec_pe32_guest_to_host"));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeUnregistersEscapingStackBaseOnEveryReturn)
+{
+	parseInput(R"(
+		define i32 @func(i1 %choose) {
+		entry:
+			%frame = alloca [32 x i8], align 4
+			%guest = ptrtoint [32 x i8]* %frame to i32
+			br i1 %choose, label %first, label %second
+		first:
+			ret i32 %guest
+		second:
+			ret i32 %guest
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* function = module->getFunction("func");
+	auto* frame = getValueByName("frame");
+	unsigned unregisters = 0;
+	for (BasicBlock& block : *function)
+	{
+		auto* returnInstruction = dyn_cast<ReturnInst>(block.getTerminator());
+		if (returnInstruction == nullptr)
+		{
+			continue;
+		}
+		auto* unregister = dyn_cast<CallInst>(returnInstruction->getPrevNode());
+		ASSERT_NE(nullptr, unregister);
+		ASSERT_NE(nullptr, unregister->getCalledFunction());
+		EXPECT_EQ("retdec_pe32_unregister_host_object",
+				unregister->getCalledFunction()->getName());
+		EXPECT_EQ(frame, unregister->getArgOperand(0)->stripPointerCasts());
+		++unregisters;
+	}
+	EXPECT_EQ(2u, unregisters);
+	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
 TEST_F(Pe32PointerLegalizationTests,

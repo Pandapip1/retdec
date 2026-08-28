@@ -90,6 +90,43 @@ TEST(Pe32RuntimeTests, ConcurrentRegistrationReturnsOneStableGuestAddress)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
 }
 
+TEST(Pe32RuntimeTests, GrowsRepeatedKnownAllocationAroundContainedPointer)
+{
+	std::array<uint8_t, 128> object{};
+	const auto initialGuest = __retdec_pe32_host_to_guest(
+			object.data() + 12, object.data(), 16);
+	ASSERT_NE(0u, initialGuest);
+	ASSERT_EQ(object.data() + 12,
+			__retdec_pe32_guest_to_host(initialGuest));
+
+	const auto expandedGuest = __retdec_pe32_host_to_guest(
+			object.data() + 12, object.data(), object.size());
+	EXPECT_EQ(initialGuest, expandedGuest);
+	EXPECT_EQ(object.data() + 100,
+			__retdec_pe32_guest_to_host(expandedGuest + 88));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(object.data()));
+}
+
+TEST(Pe32RuntimeTests, ReusesOverlappingReturnedFrameAfterUnregistration)
+{
+	std::array<uint8_t, 256> stackStorage{};
+	const auto returnedFrameGuest = __retdec_pe32_host_to_guest(
+			stackStorage.data() + 44, stackStorage.data() + 32, 64);
+	ASSERT_NE(0u, returnedFrameGuest);
+
+	// A differently based frame cannot silently replace a still-live overlap.
+	EXPECT_EQ(0u, __retdec_pe32_host_to_guest(
+			stackStorage.data() + 12, stackStorage.data(), 128));
+	ASSERT_EQ(1, retdec_pe32_unregister_host_object(stackStorage.data() + 32));
+
+	const auto reusedFrameGuest = __retdec_pe32_host_to_guest(
+			stackStorage.data() + 12, stackStorage.data(), 128);
+	ASSERT_NE(0u, reusedFrameGuest);
+	EXPECT_EQ(stackStorage.data() + 100,
+			__retdec_pe32_guest_to_host(reusedFrameGuest + 88));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(stackStorage.data()));
+}
+
 TEST(Pe32RuntimeTests, RejectsOverlappingExactGuestRegions)
 {
 	std::array<uint8_t, 8> first{};

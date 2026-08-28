@@ -88,6 +88,14 @@ bool rangesOverlap(T firstBase, uint32_t firstSize, T secondBase, uint32_t secon
 			&& secondBase <= firstBase + (firstSize - 1u);
 }
 
+template<typename T>
+bool rangeContains(T outerBase, uint32_t outerSize, T innerBase, uint32_t innerSize)
+{
+	return innerBase >= outerBase
+			&& innerBase - outerBase < outerSize
+			&& innerSize <= outerSize - (innerBase - outerBase);
+}
+
 bool regionCanGrow(const Region& region, uint32_t extent)
 {
 	if (!hostRangeValid(region.hostBase, extent)
@@ -275,6 +283,11 @@ extern "C" uint32_t __retdec_pe32_host_to_guest(
 		return 0;
 	}
 	const auto address = reinterpret_cast<uintptr_t>(pointer);
+	const auto requestedBase = reinterpret_cast<uintptr_t>(allocationBase);
+	const bool validKnownAllocation = allocationSize != 0
+			&& hostRangeValid(requestedBase, allocationSize)
+			&& address >= requestedBase
+			&& address - requestedBase < allocationSize;
 	{
 		std::lock_guard<std::mutex> lock(regionsMutex);
 		for (const auto& region : regions)
@@ -282,8 +295,21 @@ extern "C" uint32_t __retdec_pe32_host_to_guest(
 			if (address >= region.hostBase
 					&& address - region.hostBase < region.extent)
 			{
-				return region.guestBase + static_cast<uint32_t>(
-						address - region.hostBase);
+				// A known allocation may reuse an address previously registered
+				// with a smaller extent (notably a native stack frame).  Let
+				// registerRegion() grow the exact-base mapping before returning an
+				// interior guest pointer.  Unknown or already-contained mappings
+				// keep the fast path.
+				if (!validKnownAllocation || rangeContains(
+						region.hostBase,
+						region.extent,
+						requestedBase,
+						allocationSize))
+				{
+					return region.guestBase + static_cast<uint32_t>(
+							address - region.hostBase);
+				}
+				break;
 			}
 		}
 	}
