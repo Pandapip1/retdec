@@ -331,6 +331,103 @@ NativeObjectExtent getNativeObjectExtent(
 	return {base, std::min(size, uint64_t{UINT32_MAX})};
 }
 
+bool expandRecoveredPeArrays(
+		Module* module,
+		Config* config,
+		const std::vector<PtrToIntInst*>& hostEscapes)
+{
+	auto* fileImage = FileImageProvider::getFileImage(module);
+	if (fileImage == nullptr || fileImage->getImage() == nullptr)
+	{
+		return false;
+	}
+
+	std::map<GlobalVariable*, uint64_t> candidates;
+	for (PtrToIntInst* escape : hostEscapes)
+	{
+		SmallPtrSet<Value*, 16> arithmeticUses;
+		if (!valueFeedsGuestAddressArithmetic(escape, arithmeticUses))
+		{
+			continue;
+		}
+		auto* global = dyn_cast<GlobalVariable>(GetUnderlyingObject(
+				escape->getPointerOperand(), module->getDataLayout()));
+		// Mutable PE globals are owned by the native adapter and may have a
+		// deliberately scalar ABI even when indexed guest arithmetic reaches
+		// adjacent controller storage.  Only immutable image tables can be
+		// safely reconstructed here from their original bytes.
+		if (global == nullptr || !global->hasInitializer() || !global->isConstant()
+				|| !global->getValueType()->isSized())
+		{
+			continue;
+		}
+		auto extent = getNativeObjectExtent(
+				module, escape->getPointerOperand(), config, true);
+		const uint64_t nativeSize = module->getDataLayout().getTypeAllocSize(
+				global->getValueType());
+		if (extent.size > nativeSize)
+		{
+			candidates[global] = std::max(candidates[global], extent.size);
+		}
+	}
+
+	bool changed = false;
+	for (const auto& candidate : candidates)
+	{
+		auto* global = candidate.first;
+		const uint64_t size = candidate.second;
+		auto address = config->getGlobalAddress(global);
+		if (address.isUndefined() || address.getValue() > UINT32_MAX
+				|| size > UINT32_MAX)
+		{
+			continue;
+		}
+		std::vector<uint8_t> bytes;
+		bytes.reserve(size);
+		for (uint64_t offset = 0; offset < size; ++offset)
+		{
+			uint64_t value = 0;
+			if (!fileImage->getImage()->getXByte(
+						address.getValue() + offset, 1, value))
+			{
+				bytes.clear();
+				break;
+			}
+			bytes.push_back(static_cast<uint8_t>(value));
+		}
+		if (bytes.size() != size)
+		{
+			continue;
+		}
+
+		const std::string name = global->getName().str();
+		global->setName(name + ".retdec.scalar");
+		auto* initializer = ConstantDataArray::get(module->getContext(), bytes);
+		auto* expanded = new GlobalVariable(
+				*module,
+				initializer->getType(),
+				global->isConstant(),
+				global->getLinkage(),
+				initializer,
+				name);
+		expanded->setVisibility(global->getVisibility());
+		expanded->setDLLStorageClass(global->getDLLStorageClass());
+		expanded->setUnnamedAddr(global->getUnnamedAddr());
+		expanded->setExternallyInitialized(global->isExternallyInitialized());
+		expanded->setThreadLocalMode(global->getThreadLocalMode());
+		expanded->setAlignment(global->getAlignment());
+		if (global->hasSection())
+		{
+			expanded->setSection(global->getSection());
+		}
+		global->replaceAllUsesWith(ConstantExpr::getBitCast(
+				expanded, global->getType()));
+		global->eraseFromParent();
+		changed = true;
+	}
+	return changed;
+}
+
 Value* pointerAsBytePointer(IRBuilder<>& builder, Value* pointer)
 {
 	auto* bytePointer = Type::getInt8PtrTy(pointer->getContext());
@@ -1145,6 +1242,7 @@ bool Pe32PointerBridge::run()
 			}
 		}
 	}
+	changed |= expandRecoveredPeArrays(_module, _config, hostEscapes);
 	auto rememberStackMapping = [&](Value* pointer)
 	{
 		auto* base = dyn_cast<AllocaInst>(

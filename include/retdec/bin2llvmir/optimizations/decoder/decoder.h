@@ -174,6 +174,7 @@ class Decoder : public llvm::ModulePass
 
 		std::map<common::Address, llvm::Function*> _addr2fnc;
 		std::map<llvm::Function*, common::Address> _fnc2addr;
+		std::set<common::Address> _pe32RelocatedEntries;
 		// Function sizes from debug info/symbol table/config/etc.
 		// Used to prevent function splitting.
 		//

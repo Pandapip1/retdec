@@ -631,17 +631,19 @@ void Decoder::initJumpTargetsPe32Relocations()
 			{
 				continue;
 			}
-			if (auto* jumpTarget = _jumpTargets.push(
+			if (_jumpTargets.push(
 					target,
 					JumpTarget::eType::VTABLE,
 					_c2l->getBasicMode(),
 					cell))
 			{
-				// Non-leftover targets are decoded only when they already own a
-				// function/basic block.  Relocation-only interior entries have
-				// neither, so merely queueing the address would be a no-op.
-				auto* function = createFunction(jumpTarget->getAddress());
-				function->addFnAttr("retdec.pe32.relocated-entry");
+				// Do not create a function eagerly.  A relocation may name a case
+				// label in a jump table whose owner has not been decoded yet; early
+				// function ownership prevents the table from becoming one LLVM
+				// switch.  The VTABLE target remains in the primary range and is
+				// decoded as a leftover function only if normal control flow does
+				// not claim it first.
+				_pe32RelocatedEntries.insert(target);
 			}
 		}
 		cursor += blockSize;

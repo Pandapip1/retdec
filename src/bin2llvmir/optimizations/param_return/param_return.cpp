@@ -1086,8 +1086,18 @@ void ParamReturn::applyToIr(DataFlowEntry& de)
 
 		for (auto& e : de.retEntries())
 		{
-			auto* l = new LoadInst(de.getRetValue(), "", e.getRetInstruction());
-			rets2vals[e.getRetInstruction()] = l;
+			auto* ret = e.getRetInstruction();
+			// Earlier ABI rewrites can leave a recovered return entry whose
+			// instruction has already been detached from its basic block.  LLVM
+			// cannot use such an instruction as an insertion point.  It also
+			// cannot contribute a return value to the function being rebuilt.
+			if (ret == nullptr || ret->getParent() == nullptr
+					|| ret->getFunction() != fnc)
+			{
+				continue;
+			}
+			auto* l = new LoadInst(de.getRetValue(), "", ret);
+			rets2vals[ret] = l;
 		}
 	}
 	else

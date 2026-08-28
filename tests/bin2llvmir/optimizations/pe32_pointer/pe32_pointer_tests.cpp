@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <map>
 
 #include "bin2llvmir/utils/llvmir_tests.h"
 #include "retdec/bin2llvmir/optimizations/pe32_pointer/pe32_pointer.h"
@@ -31,7 +32,8 @@ class Pe32PointerLegalizationTests: public LlvmIrTests
 		void addPe32HighLowRelocation(
 				Config& config,
 				uint32_t cellAddress,
-				uint32_t targetAddress)
+				uint32_t targetAddress,
+				const std::map<uint32_t, uint8_t>& imageBytes = {})
 		{
 			// Minimal PE32 image with one .reloc section.  Its relocation block
 			// describes a HIGHLOW cell whose original contents are a preferred
@@ -86,6 +88,12 @@ class Pe32PointerLegalizationTests: public LlvmIrTests
 			put16(0x208, 0x3000 | (cellAddress & 0xfff));
 			put16(0x20a, 0);
 			put32(0x200 + (cellAddress & 0xfff), targetAddress);
+			for (const auto& byte : imageBytes)
+			{
+				ASSERT_GE(byte.first, 0x402000u);
+				ASSERT_LT(byte.first, 0x402200u);
+				bytes[0x200 + byte.first - 0x402000] = byte.second;
+			}
 
 			auto pe = std::make_shared<fileformat::PeFormat>(
 					bytes.data(), bytes.size());
@@ -522,6 +530,62 @@ TEST_F(Pe32PointerLegalizationTests,
 			encode->getArgOperand(1)->stripPointerCasts());
 	auto* extent = cast<ConstantInt>(encode->getArgOperand(2));
 	EXPECT_EQ(18u, extent->getZExtValue());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
+TEST_F(Pe32PointerLegalizationTests,
+		bridgeExpandsIndexedRecoveredScalarFromPeImage)
+{
+	parseInput(R"(
+		@recovered.table = constant i32 0
+		@following.object = constant i8 0
+		define i32 @use.table(i32 %index) {
+			%base = ptrtoint i32* @recovered.table to i32
+			%offset = mul i32 %index, 4
+			%address = add i32 %base, %offset
+			%pointer = inttoptr i32 %address to i32*
+			%value = load i32, i32* %pointer, align 4
+			ret i32 %value
+		}
+	)");
+	auto config = createConfig("pe32", 32);
+	addGlobalAddress(config, "recovered.table", 0x402010);
+	addGlobalAddress(config, "following.object", 0x402024);
+	std::map<uint32_t, uint8_t> imageBytes;
+	for (uint32_t offset = 0; offset < 20; ++offset)
+	{
+		imageBytes[0x402010 + offset] = static_cast<uint8_t>(0x80 + offset);
+	}
+	addPe32HighLowRelocation(
+			config, 0x402100, 0x401000, imageBytes);
+
+	ASSERT_TRUE(bridge.runOnModuleCustom(*module, &config));
+	auto* expanded = module->getGlobalVariable("recovered.table");
+	ASSERT_NE(nullptr, expanded);
+	auto* arrayType = dyn_cast<ArrayType>(expanded->getValueType());
+	ASSERT_NE(nullptr, arrayType);
+	EXPECT_EQ(20u, arrayType->getNumElements());
+	auto* initializer = dyn_cast<ConstantDataArray>(expanded->getInitializer());
+	ASSERT_NE(nullptr, initializer);
+	for (unsigned offset = 0; offset < 20; ++offset)
+	{
+		EXPECT_EQ(0x80u + offset, initializer->getElementAsInteger(offset));
+	}
+
+	CallInst* encode = nullptr;
+	for (Instruction& instruction : instructions(*module->getFunction("use.table")))
+	{
+		auto* call = dyn_cast<CallInst>(&instruction);
+		if (call != nullptr && call->getCalledFunction() != nullptr
+				&& call->getCalledFunction()->getName()
+						== "__retdec_pe32_host_to_guest")
+		{
+			encode = call;
+		}
+	}
+	ASSERT_NE(nullptr, encode);
+	EXPECT_EQ(expanded, encode->getArgOperand(1)->stripPointerCasts());
+	EXPECT_EQ(20u, cast<ConstantInt>(encode->getArgOperand(2))->getZExtValue());
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 

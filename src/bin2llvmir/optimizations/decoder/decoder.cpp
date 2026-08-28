@@ -158,6 +158,17 @@ void Decoder::decode()
 	{
 		throw std::runtime_error("No instructions were decoded");
 	}
+
+	// Relocation-only entries which survived as independent functions need
+	// runtime x87 TOP semantics.  Entries absorbed as ordinary blocks of a
+	// recognized switch intentionally do not mark the owning function.
+	for (auto address : _pe32RelocatedEntries)
+	{
+		if (auto* function = getFunctionAtAddress(address))
+		{
+			function->addFnAttr("retdec.pe32.relocated-entry");
+		}
+	}
 }
 
 bool Decoder::getJumpTarget(JumpTarget& jt)
