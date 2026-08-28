@@ -175,6 +175,42 @@ TEST(Pe32RuntimeTests, RejectsInconsistentOverlappingFixedMappings)
 	EXPECT_EQ(1, retdec_pe32_unregister_host_object(backingObject.data()));
 }
 
+TEST(Pe32RuntimeTests, ExpandsKnownAllocationAroundFixedInnerAliases)
+{
+	std::array<uint8_t, 16> backingObject{};
+	constexpr uint32_t guestBase = 0x62004000u;
+	ASSERT_EQ(guestBase + 4, retdec_pe32_register_host_object(
+			backingObject.data() + 4, 4, guestBase + 4));
+	ASSERT_EQ(guestBase + 2, retdec_pe32_register_host_object(
+			backingObject.data() + 2, 4, guestBase + 2));
+	ASSERT_EQ(guestBase + 1, retdec_pe32_register_host_object(
+			backingObject.data() + 1, 4, guestBase + 1));
+
+	EXPECT_EQ(guestBase, __retdec_pe32_host_to_guest(
+			backingObject.data(), backingObject.data(), 4));
+	EXPECT_EQ(backingObject.data(),
+			__retdec_pe32_guest_to_host(guestBase));
+	EXPECT_EQ(backingObject.data() + 7,
+			__retdec_pe32_guest_to_host(guestBase + 7));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(backingObject.data()));
+}
+
+TEST(Pe32RuntimeTests, ExpandsKnownAllocationForwardAcrossFixedAliases)
+{
+	std::array<uint8_t, 16> backingObject{};
+	constexpr uint32_t guestBase = 0x62005000u;
+	ASSERT_EQ(guestBase, retdec_pe32_register_host_object(
+			backingObject.data(), 4, guestBase));
+	ASSERT_EQ(guestBase + 6, retdec_pe32_register_host_object(
+			backingObject.data() + 6, 4, guestBase + 6));
+
+	EXPECT_EQ(guestBase, __retdec_pe32_host_to_guest(
+			backingObject.data(), backingObject.data(), 10));
+	EXPECT_EQ(backingObject.data() + 9,
+			__retdec_pe32_guest_to_host(guestBase + 9));
+	EXPECT_EQ(1, retdec_pe32_unregister_host_object(backingObject.data()));
+}
+
 TEST(Pe32RuntimeTests, TranslatesObjectsAndFunctionsInsideRegisteredSections)
 {
 	std::array<uint8_t, 128> section{};
