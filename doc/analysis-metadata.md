@@ -48,8 +48,10 @@ Each recovered function has a `value_flow` object containing `definitions` and
 `ambiguous_merges`. A definition is identified by the address of the machine
 instruction that produced it. Its `destination` is either a canonical register
 alias family (for example, writes to `al`, `ax`, and `eax` all name `eax` in a
-32-bit image) or a frame/stack-pointer-relative stack location. The recorded
-size remains the width of the actual write.
+32-bit image), a frame/stack-pointer-relative stack location, or a terminal
+memory effect. Memory destinations contain normalized base and index register
+families, scale, signed displacement, and access width. The recorded size
+remains the width of the actual write.
 
 The emitted definitions are a demand-independent backward graph, compacted to
 the slice transitively derived from imported calls. A `call_return` is a root
@@ -67,7 +69,18 @@ and its `role` describes how it participates:
 Operations are `call_return`, `copy`, `stack_store`, `stack_load`,
 `pointer_load`, `indexed_load`, `address`, `constant`, and `transform`.
 Instruction operands remain the source of scale, displacement, and immediate
-details, avoiding a second instruction encoding in the value-flow graph.
+details for value-producing loads. `pointer_store` is a terminal effect rather
+than an alias-analysis definition: its destination records base, index, scale,
+displacement, and width directly; its inputs independently identify the
+unambiguous `base`, `index`, and stored `value` definitions. An immediate
+stored value is emitted as `stored_immediate`.
+
+Only stores whose unambiguous base or index provenance descends from an
+imported return are retained. A retained store includes the complete
+unambiguous provenance of its address operands and stored value, even when an
+operand itself does not descend from that imported return. This operand
+closure does not seed other downstream effects, and every emitted `definition`
+edge names another emitted record.
 
 The analysis propagates reaching definitions across recovered CFG edges. At a
 merge it emits an edge only when all incoming paths agree on the same

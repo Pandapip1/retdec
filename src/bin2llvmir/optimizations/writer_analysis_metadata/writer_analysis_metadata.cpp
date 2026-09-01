@@ -457,7 +457,8 @@ void writeImportThunks(
 enum class ValueLocationKind
 {
 	Register,
-	Stack
+	Stack,
+	Memory
 };
 
 struct ValueLocation
@@ -465,17 +466,22 @@ struct ValueLocation
 	ValueLocationKind kind = ValueLocationKind::Register;
 	std::string name;
 	std::int64_t displacement = 0;
+	std::string index;
+	int scale = 1;
 
 	bool operator<(const ValueLocation& other) const
 	{
-		return std::tie(kind, name, displacement)
-				< std::tie(other.kind, other.name, other.displacement);
+		return std::tie(kind, name, displacement, index, scale)
+				< std::tie(
+						other.kind, other.name, other.displacement,
+						other.index, other.scale);
 	}
 
 	bool operator==(const ValueLocation& other) const
 	{
 		return kind == other.kind && name == other.name
-				&& displacement == other.displacement;
+				&& displacement == other.displacement
+				&& index == other.index && scale == other.scale;
 	}
 };
 
@@ -498,6 +504,8 @@ struct ValueFlowRecord
 	bool importedCallReturn = false;
 	bool hasCallTarget = false;
 	std::uint64_t callTarget = 0;
+	bool hasStoredImmediate = false;
+	std::int64_t storedImmediate = 0;
 };
 
 struct ValueFlowAmbiguity
@@ -602,6 +610,20 @@ bool stackLocation(
 	}
 	result = {ValueLocationKind::Stack, base, operand.mem.disp};
 	return true;
+}
+
+ValueLocation memoryLocation(
+		csh handle,
+		const cs_x86_op& operand,
+		unsigned int bits)
+{
+	ValueLocation result;
+	result.kind = ValueLocationKind::Memory;
+	result.name = canonicalRegisterName(handle, operand.mem.base, bits);
+	result.displacement = operand.mem.disp;
+	result.index = canonicalRegisterName(handle, operand.mem.index, bits);
+	result.scale = operand.mem.scale;
+	return result;
 }
 
 bool primaryWrittenLocation(
@@ -892,6 +914,35 @@ ValueFlowRecord describeDefinition(
 				&& importedTargets.count(record.callTarget) != 0;
 		return record;
 	}
+	if (instruction.id == X86_INS_MOV && instruction.detail != nullptr
+			&& instruction.detail->x86.op_count >= 2
+			&& instruction.detail->x86.operands[0].type == X86_OP_MEM)
+	{
+		const auto& destination = instruction.detail->x86.operands[0];
+		ValueLocation stack;
+		if (!stackLocation(handle, destination, bits, stack))
+		{
+			record.operation = "pointer_store";
+			record.destination = memoryLocation(
+					handle, destination, bits);
+			record.size = destination.size;
+			addMemoryInputs(record, state, handle, destination, bits,
+					ambiguities, block);
+			const auto& source = instruction.detail->x86.operands[1];
+			if (source.type == X86_OP_REG)
+			{
+				addInput(record, state,
+						registerLocation(handle, source.reg, bits), "value",
+						ambiguities, block);
+			}
+			else if (source.type == X86_OP_IMM)
+			{
+				record.hasStoredImmediate = true;
+				record.storedImmediate = source.imm;
+			}
+			return record;
+		}
+	}
 
 	if (!primaryWrittenLocation(
 			handle, instruction, bits, record.destination, record.size))
@@ -999,7 +1050,8 @@ void writeValueLocation(
 	writer.StartObject();
 	key(writer, "kind");
 	writer.String(location.kind == ValueLocationKind::Register
-			? "register" : "stack");
+			? "register"
+			: (location.kind == ValueLocationKind::Stack ? "stack" : "memory"));
 	if (location.kind == ValueLocationKind::Register)
 	{
 		key(writer, "register"); writer.String(location.name.c_str());
@@ -1007,6 +1059,11 @@ void writeValueLocation(
 	else
 	{
 		key(writer, "base"); writer.String(location.name.c_str());
+		if (location.kind == ValueLocationKind::Memory)
+		{
+			key(writer, "index"); writer.String(location.index.c_str());
+			key(writer, "scale"); writer.Int(location.scale);
+		}
 		key(writer, "displacement"); writer.Int64(location.displacement);
 	}
 	if (size != 0)
@@ -1118,11 +1175,46 @@ ValueFlowResult analyzeValueFlow(
 			}
 			for (const auto& input : item.second.inputs)
 			{
+				// A store is an observable effect of a derived pointer only
+				// when its address, rather than merely its stored value,
+				// descends from an imported return.
+				if (item.second.operation == "pointer_store"
+						&& input.role == "value")
+				{
+					continue;
+				}
 				if (result.interesting.count(input.definition) != 0)
 				{
 					result.interesting.insert(item.first);
 					added = true;
 					break;
+				}
+			}
+		}
+	}
+
+	// Retain the complete, unambiguous provenance of every operand used by
+	// the forward slice. This is deliberately a separate backwards-only
+	// closure: operand definitions become visible, but do not seed unrelated
+	// downstream effects.
+	added = true;
+	while (added)
+	{
+		added = false;
+		const auto retained = result.interesting;
+		for (const auto address : retained)
+		{
+			const auto found = result.records.find(address);
+			if (found == result.records.end())
+			{
+				continue;
+			}
+			for (const auto& input : found->second.inputs)
+			{
+				if (result.records.count(input.definition) != 0
+						&& result.interesting.insert(input.definition).second)
+				{
+					added = true;
 				}
 			}
 		}
@@ -1152,6 +1244,11 @@ void writeValueFlow(Writer& writer, const ValueFlowResult& flow)
 		if (record.hasCallTarget)
 		{
 			key(writer, "call_target"); address(writer, record.callTarget);
+		}
+		if (record.hasStoredImmediate)
+		{
+			key(writer, "stored_immediate");
+			writer.Int64(record.storedImmediate);
 		}
 		key(writer, "inputs");
 		writer.StartArray();
