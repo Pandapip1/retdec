@@ -19,6 +19,7 @@
         "backendNoCompoundOperators": false,
         "backendNoSymbolicNames": false,
         "pe32PointerBridge": false,
+        "emitLiftedDwarf": false,
         "timeout": 0,
         "maxMemoryLimit": 0,
         "maxMemoryLimitHalfRam": true,

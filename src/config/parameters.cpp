@@ -58,6 +58,7 @@ const std::string JSON_backendNoVarRenaming     = "backendNoVarRenaming";
 const std::string JSON_backendNoCompoundOperators = "backendNoCompoundOperators";
 const std::string JSON_backendNoSymbolicNames   = "backendNoSymbolicNames";
 const std::string JSON_pe32PointerBridge        = "pe32PointerBridge";
+const std::string JSON_emitLiftedDwarf          = "emitLiftedDwarf";
 
 const std::string JSON_timeout                  = "timeout";
 const std::string JSON_maxMemoryLimit           = "maxMemoryLimit";
@@ -155,6 +156,11 @@ bool Parameters::isBackendNoSymbolicNames() const
 bool Parameters::isPe32PointerBridge() const
 {
 	return _pe32PointerBridge;
+}
+
+bool Parameters::isEmitLiftedDwarf() const
+{
+	return _emitLiftedDwarf;
 }
 
 
@@ -341,6 +347,11 @@ void Parameters::setIsPe32PointerBridge(bool b)
 	_pe32PointerBridge = b;
 }
 
+void Parameters::setIsEmitLiftedDwarf(bool b)
+{
+	_emitLiftedDwarf = b;
+}
+
 void Parameters::setIsDetectStaticCode(bool b)
 {
 	_detectStaticCode = b;
@@ -525,6 +536,7 @@ void Parameters::serialize(Writer& writer) const
 	serdes::serializeBool(writer, JSON_backendNoCompoundOperators, isBackendNoCompoundOperators());
 	serdes::serializeBool(writer, JSON_backendNoSymbolicNames, isBackendNoSymbolicNames());
 	serdes::serializeBool(writer, JSON_pe32PointerBridge, isPe32PointerBridge());
+	serdes::serializeBool(writer, JSON_emitLiftedDwarf, isEmitLiftedDwarf());
 
 	serdes::serializeUint64(writer, JSON_timeout, getTimeout());
 	serdes::serializeUint64(writer, JSON_maxMemoryLimit, getMaxMemoryLimit());
@@ -594,6 +606,7 @@ void Parameters::deserialize(const rapidjson::Value& val)
 	setIsBackendNoCompoundOperators( serdes::deserializeBool(val, JSON_backendNoCompoundOperators, false) );
 	setIsBackendNoSymbolicNames( serdes::deserializeBool(val, JSON_backendNoSymbolicNames, false) );
 	setIsPe32PointerBridge( serdes::deserializeBool(val, JSON_pe32PointerBridge, false) );
+	setIsEmitLiftedDwarf( serdes::deserializeBool(val, JSON_emitLiftedDwarf, false) );
 
 	setTimeout( serdes::deserializeUint64(val, JSON_timeout, 0) );
 	setMaxMemoryLimit( serdes::deserializeUint64(val, JSON_maxMemoryLimit, 0) );

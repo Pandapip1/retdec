@@ -1,5 +1,5 @@
 execute_process(
-	COMMAND "${RETDEC_DECOMPILER}" --pe32-pointer-bridge --help
+	COMMAND "${RETDEC_DECOMPILER}" --pe32-pointer-bridge --emit-lifted-dwarf --help
 	RESULT_VARIABLE result
 	OUTPUT_VARIABLE output
 	ERROR_VARIABLE error
@@ -12,6 +12,7 @@ endif()
 
 foreach(required
 		"--pe32-pointer-bridge"
+		"--emit-lifted-dwarf"
 		"__retdec_pe32_host_to_guest"
 		"__retdec_pe32_guest_to_host")
 	string(FIND "${output}" "${required}" found)

@@ -43,6 +43,7 @@ class Parameters
 		bool isBackendNoCompoundOperators() const;
 		bool isBackendNoSymbolicNames() const;
 		bool isPe32PointerBridge() const;
+		bool isEmitLiftedDwarf() const;
 		/// @}
 
 		/// @name Parameters set methods.
@@ -83,6 +84,7 @@ class Parameters
 		void setIsBackendNoCompoundOperators(bool b);
 		void setIsBackendNoSymbolicNames(bool b);
 		void setIsPe32PointerBridge(bool b);
+		void setIsEmitLiftedDwarf(bool b);
 		/// @}
 
 		/// @name Parameters get methods.
@@ -183,6 +185,7 @@ class Parameters
 		bool _backendNoCompoundOperators = false;
 		bool _backendNoSymbolicNames = false;
 		bool _pe32PointerBridge = false;
+		bool _emitLiftedDwarf = false;
 
 		retdec::common::Address _entryPoint;
 		retdec::common::Address _mainAddress;

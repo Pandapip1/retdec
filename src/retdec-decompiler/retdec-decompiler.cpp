@@ -392,6 +392,10 @@ void ProgramOptions::loadOption(std::list<std::string>::iterator& i)
 	{
 		params.setIsPe32PointerBridge(true);
 	}
+	else if (isParam(i, "", "--emit-lifted-dwarf"))
+	{
+		params.setIsEmitLiftedDwarf(true);
+	}
 	else if (isParam(i, "", "--stop-after"))
 	{
 		auto phase = getParamOrDie(i);
@@ -644,6 +648,7 @@ General arguments:
 	[--config] Specify JSON decompilation configuration file.
 	[--disable-static-code-detection] Prevents detection of statically linked code.
 	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked. External PE HIGHLOW cells must retain their original 32-bit guest addresses rather than native ELF symbol relocations; the output module records this contract in retdec.pe32.external-pointers-use-guest-addresses.
+	[--emit-lifted-dwarf] Adds synthetic DWARF subprogram and line metadata for lifted functions to emitted LLVM bitcode. Names come from RetDec's recovered function names; the input binary is used as the synthetic source file.
 	[--stop-after bin2llvmir] Stops after emitting backend LLVM IR and bitcode, without running LLVM IR to HLL conversion.
 Selective decompilation arguments:
 	[--select-ranges RANGES] Specify a comma separated list of ranges to decompile (example: 0x100-0x200,0x300-0x400,0x500-0x600).
