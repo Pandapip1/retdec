@@ -58,7 +58,61 @@ class DecoderTests: public LlvmIrTests
 			}
 			decoder.inlineSharedTailBranches();
 		}
+
+		void redirectImportThunkUsers(
+				Decoder& decoder,
+				Function* thunk,
+				Function* imported,
+				common::Address iatAddress)
+		{
+			decoder.redirectImportThunkUsers(
+					thunk, imported, iatAddress);
+		}
 };
+
+TEST_F(DecoderTests, directCallsToPeImportThunkUseImportedFunction)
+{
+	parseInput(R"(
+		declare i32 @ntgloadr_task(i32, i32)
+
+		declare i32 @function_514bb5e4(i32, i32)
+
+		define i32 @mpplan_root() {
+		entry:
+		  %singleton = call i32 @function_514bb5e4(i32 213, i32 2560)
+		  %repeated0 = call i32 @function_514bb5e4(i32 215, i32 892)
+		  %repeated1 = call i32 @function_514bb5e4(i32 215, i32 892)
+		  %repeated2 = call i32 @function_514bb5e4(i32 215, i32 892)
+		  %repeated3 = call i32 @function_514bb5e4(i32 215, i32 892)
+		  ret i32 %repeated3
+		}
+	)");
+
+	auto* thunk = module->getFunction("function_514bb5e4");
+	auto* imported = module->getFunction("ntgloadr_task");
+	Decoder decoder;
+	redirectImportThunkUsers(
+			decoder, thunk, imported, common::Address(0x514bc150));
+
+	unsigned importedCalls = 0;
+	for (auto& instruction : module->getFunction("mpplan_root")->front())
+	{
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			EXPECT_EQ(imported, call->getCalledFunction());
+			++importedCalls;
+		}
+	}
+	EXPECT_EQ(5u, importedCalls);
+	EXPECT_TRUE(thunk->use_empty());
+	EXPECT_TRUE(thunk->hasFnAttribute("retdec.import-thunk"));
+	EXPECT_EQ(
+			"ntgloadr_task",
+			thunk->getFnAttribute("retdec.import-name").getValueAsString());
+	EXPECT_EQ(
+			"514bc150",
+			thunk->getFnAttribute("retdec.import-iat").getValueAsString());
+}
 
 TEST_F(DecoderTests, unresolvedComputedCallIsPreservedAsIndirectCall)
 {

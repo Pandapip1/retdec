@@ -136,6 +136,11 @@ class Decoder : public llvm::ModulePass
 
 		void resolvePseudoCalls();
 		void finalizePseudoCalls();
+		void resolveImportThunks();
+		void redirectImportThunkUsers(
+				llvm::Function* thunk,
+				llvm::Function* imported,
+				common::Address iatAddress);
 
 	// Basic block related methods.
 	//
