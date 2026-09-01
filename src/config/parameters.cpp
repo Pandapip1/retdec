@@ -38,6 +38,7 @@ const std::string JSON_outputBitcodeFile        = "outputBitcodeFile";
 const std::string JSON_outputAsmFile            = "outputAsmFile";
 const std::string JSON_outputLlFile             = "outputLlFile";
 const std::string JSON_outputConfigFile         = "outputConfigFile";
+const std::string JSON_outputAnalysisMetadataFile = "outputAnalysisMetadataFile";
 const std::string JSON_outputUnpackedFile       = "outputUnpackedFile";
 const std::string JSON_outputFormat             = "outputFormat";
 const std::string JSON_logFile                  = "logFile";
@@ -211,6 +212,11 @@ void Parameters::setOutputLlvmirFile(const std::string& file)
 void Parameters::setOutputConfigFile(const std::string& file)
 {
 	_outputConfigFile = file;
+}
+
+void Parameters::setOutputAnalysisMetadataFile(const std::string& file)
+{
+	_outputAnalysisMetadataFile = file;
 }
 
 void Parameters::setOutputUnpackedFile(const std::string& file)
@@ -397,6 +403,11 @@ const std::string& Parameters::getOutputConfigFile() const
 	return _outputConfigFile;
 }
 
+const std::string& Parameters::getOutputAnalysisMetadataFile() const
+{
+	return _outputAnalysisMetadataFile;
+}
+
 const std::string& Parameters::getOutputUnpackedFile() const
 {
 	return _outputUnpackedFile;
@@ -516,6 +527,7 @@ void Parameters::serialize(Writer& writer) const
 	serdes::serializeString(writer, JSON_outputAsmFile, getOutputAsmFile());
 	serdes::serializeString(writer, JSON_outputLlFile, getOutputLlvmirFile());
 	serdes::serializeString(writer, JSON_outputConfigFile, getOutputConfigFile());
+	serdes::serializeString(writer, JSON_outputAnalysisMetadataFile, getOutputAnalysisMetadataFile());
 	serdes::serializeString(writer, JSON_outputUnpackedFile, getOutputUnpackedFile());
 	serdes::serializeString(writer, JSON_outputFormat, getOutputFormat());
 	serdes::serializeString(writer, JSON_logFile, getLogFile());
@@ -586,6 +598,7 @@ void Parameters::deserialize(const rapidjson::Value& val)
 	setOutputAsmFile( serdes::deserializeString(val, JSON_outputAsmFile) );
 	setOutputLlvmirFile( serdes::deserializeString(val, JSON_outputLlFile) );
 	setOutputConfigFile( serdes::deserializeString(val, JSON_outputConfigFile) );
+	setOutputAnalysisMetadataFile( serdes::deserializeString(val, JSON_outputAnalysisMetadataFile) );
 	setOutputUnpackedFile( serdes::deserializeString(val, JSON_outputUnpackedFile) );
 	setOutputFormat( serdes::deserializeString(val, JSON_outputFormat) );
 	setLogFile( serdes::deserializeString(val, JSON_logFile) );

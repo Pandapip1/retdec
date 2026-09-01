@@ -65,6 +65,18 @@ TEST_F(ConfigTests, Pe32PointerBridgeIsOptInAndRoundTripsThroughJson)
 	EXPECT_TRUE(reparsed.parameters.isPe32PointerBridge());
 }
 
+TEST_F(ConfigTests, AnalysisMetadataOutputRoundTripsThroughJson)
+{
+	const std::string output = "/tmp/retdec-analysis.json";
+	EXPECT_TRUE(config.parameters.getOutputAnalysisMetadataFile().empty());
+	config.parameters.setOutputAnalysisMetadataFile(output);
+
+	Config reparsed;
+	reparsed.readJsonString(config.generateJsonString());
+
+	EXPECT_EQ(output, reparsed.parameters.getOutputAnalysisMetadataFile());
+}
+
 TEST_F(ConfigTests, ClassesGetElementByIdReturnsNullPointerWhenThereIsNoSuchClass)
 {
 	ASSERT_EQ(config.classes.end(), config.classes.find("ClassName"));

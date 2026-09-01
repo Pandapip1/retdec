@@ -20,6 +20,7 @@
         "backendNoSymbolicNames": false,
         "pe32PointerBridge": false,
         "emitLiftedDwarf": false,
+        "outputAnalysisMetadataFile": "",
         "timeout": 0,
         "maxMemoryLimit": 0,
         "maxMemoryLimitHalfRam": true,
@@ -41,6 +42,7 @@
         "llvmPasses" : [
             "retdec-provider-init",
             "retdec-decoder",
+            "retdec-write-analysis-metadata",
             "verify",
             "retdec-x86-addr-spaces",
             "retdec-x87-fpu",

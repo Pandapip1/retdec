@@ -396,19 +396,32 @@ void ProgramOptions::loadOption(std::list<std::string>::iterator& i)
 	{
 		params.setIsEmitLiftedDwarf(true);
 	}
+	else if (isParam(i, "", "--analysis-metadata"))
+	{
+		params.setOutputAnalysisMetadataFile(getParamOrDie(i));
+	}
 	else if (isParam(i, "", "--stop-after"))
 	{
 		auto phase = getParamOrDie(i);
-		if (phase != "bin2llvmir")
+		if (phase != "analysis" && phase != "bin2llvmir")
 		{
 			throw std::runtime_error(
 					"[--stop-after] unsupported phase: " + phase);
 		}
-		auto firstBackendPass = std::find(
-				params.llvmPasses.begin(),
-				params.llvmPasses.end(),
-				"retdec-llvmir2hll");
-		params.llvmPasses.erase(firstBackendPass, params.llvmPasses.end());
+		const auto lastPass = phase == "analysis"
+				? "retdec-write-analysis-metadata"
+				: "retdec-llvmir2hll";
+		auto firstExcludedPass = std::find(
+				params.llvmPasses.begin(), params.llvmPasses.end(), lastPass);
+		if (firstExcludedPass == params.llvmPasses.end())
+		{
+			throw std::runtime_error("[--stop-after] pass is absent: " + phase);
+		}
+		if (phase == "analysis")
+		{
+			++firstExcludedPass;
+		}
+		params.llvmPasses.erase(firstExcludedPass, params.llvmPasses.end());
 	}
 	else if (isParam(i, "", "--backend-disabled-opts"))
 	{
@@ -649,7 +662,8 @@ General arguments:
 	[--disable-static-code-detection] Prevents detection of statically linked code.
 	[--pe32-pointer-bridge] Replaces lossy PE32/native pointer casts with explicit runtime translation hooks. This is opt-in and requires the hooks to be linked. External PE HIGHLOW cells must retain their original 32-bit guest addresses rather than native ELF symbol relocations; the output module records this contract in retdec.pe32.external-pointers-use-guest-addresses.
 	[--emit-lifted-dwarf] Adds synthetic DWARF subprogram and line metadata for lifted functions to emitted LLVM bitcode. Names come from RetDec's recovered function names; the input binary is used as the synthetic source file.
-	[--stop-after bin2llvmir] Stops after emitting backend LLVM IR and bitcode, without running LLVM IR to HLL conversion.
+	[--analysis-metadata FILE] Writes versioned machine-readable file, section, import, function, CFG, call, instruction, and operand metadata after decoding.
+	[--stop-after analysis|bin2llvmir] Stops after analysis metadata or backend LLVM IR/bitcode emission.
 Selective decompilation arguments:
 	[--select-ranges RANGES] Specify a comma separated list of ranges to decompile (example: 0x100-0x200,0x300-0x400,0x500-0x600).
 	[--select-functions FUNCS] Specify a comma separated list of functions to decompile (example: fnc1,fnc2,fnc3).
