@@ -18,6 +18,7 @@ add_executable(tests-bin2llvmir
 	optimizations/unreachable_funcs/unreachable_funcs_tests.cpp
 	optimizations/value_protect/value_protect_test.cpp
 	optimizations/writer_dsm/writer_dsm_tests.cpp
+	optimizations/writer_analysis_metadata/writer_analysis_metadata_tests.cpp
 	optimizations/x86_addr_spaces/x86_addr_spaces_pass_test.cpp
 	optimizations/x86_addr_spaces/x86_addr_spaces_test.cpp
 	optimizations/x87_fpu/x87_fpu_test.cpp
