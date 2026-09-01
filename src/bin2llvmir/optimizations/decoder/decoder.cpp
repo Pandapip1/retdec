@@ -124,6 +124,7 @@ bool Decoder::run()
 	patternsRecognize();
 	finalizePseudoCalls();
 	inlineSharedTailBranches();
+	resolveImportThunks();
 
 	if (debug_enabled && fs::exists(_config->getOutputDirectory()))
 	{
@@ -141,6 +142,74 @@ bool Decoder::run()
 	initializeGpReg_mips();
 
 	return false;
+}
+
+void Decoder::redirectImportThunkUsers(
+		llvm::Function* thunk,
+		llvm::Function* imported,
+		common::Address iatAddress)
+{
+	if (thunk == nullptr || imported == nullptr
+			|| thunk->getFunctionType() != imported->getFunctionType())
+	{
+		return;
+	}
+
+	thunk->replaceAllUsesWith(imported);
+	thunk->addFnAttr("retdec.import-thunk");
+	thunk->addFnAttr("retdec.import-name", imported->getName());
+	thunk->addFnAttr("retdec.import-iat", iatAddress.toHexString());
+}
+
+void Decoder::resolveImportThunks()
+{
+	if (!_config->getConfig().fileFormat.isPe()
+			|| !_config->getConfig().architecture.isX86_32())
+	{
+		return;
+	}
+
+	for (const auto& [thunkAddress, thunk] : _addr2fnc)
+	{
+		AsmInstruction instruction(_module, thunkAddress);
+		const cs_insn* decoded = instruction.isValid()
+				? instruction.getCapstoneInsn() : nullptr;
+		if (decoded == nullptr)
+		{
+			auto bytes = _image->getImage()->getRawSegmentData(thunkAddress);
+			auto address = static_cast<std::uint64_t>(thunkAddress);
+			if (bytes.first != nullptr && cs_disasm_iter(
+					_c2l->getCapstoneEngine(),
+					&bytes.first, &bytes.second, &address, _dryCsInsn))
+			{
+				decoded = _dryCsInsn;
+			}
+		}
+		if (decoded == nullptr || decoded->id != X86_INS_JMP
+				|| decoded->detail == nullptr
+				|| decoded->detail->x86.op_count != 1)
+		{
+			continue;
+		}
+
+		const auto& operand = decoded->detail->x86.operands[0];
+		if (operand.type != X86_OP_MEM
+				|| operand.mem.base != X86_REG_INVALID
+				|| operand.mem.index != X86_REG_INVALID
+				|| operand.mem.disp <= 0)
+		{
+			continue;
+		}
+
+		const common::Address iatAddress(
+				static_cast<std::uint64_t>(operand.mem.disp));
+		if (_imports.count(iatAddress) == 0)
+		{
+			continue;
+		}
+		redirectImportThunkUsers(
+				thunk, getFunctionAtAddress(iatAddress), iatAddress);
+	}
 }
 
 void Decoder::decode()
