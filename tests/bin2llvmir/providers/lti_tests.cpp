@@ -39,6 +39,49 @@ class LtiTests: public LlvmIrTests
 
 };
 
+TEST_F(LtiTests, PeImportsUseConfiguredWindowsPrototypes)
+{
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	config.getConfig().fileFormat.setIsPe32();
+	config.getConfig().parameters.libraryTypeInfoPaths = {
+			RETDEC_TEST_WINDOWS_TYPES};
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto typeConfig = std::make_shared<ctypesparser::TypeConfig>();
+	Lti lti(module.get(), &config, typeConfig, image.getImage());
+
+	for (const auto& expected : std::vector<std::pair<const char*, unsigned>>{
+			{"GetLastError", 0},
+			{"GetStdHandle", 1},
+			{"HeapAlloc", 3},
+			{"HeapFree", 3},
+			{"HeapReAlloc", 4},
+			{"LoadLibraryA", 1},
+			{"WriteFile", 5}})
+	{
+		auto* type = lti.getLlvmFunctionType(expected.first);
+		ASSERT_NE(nullptr, type) << expected.first;
+		EXPECT_EQ(expected.second, type->getNumParams()) << expected.first;
+	}
+}
+
+TEST_F(LtiTests, MissingConfiguredTypeInformationFailsClosed)
+{
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	config.getConfig().fileFormat.setIsPe32();
+	config.getConfig().parameters.libraryTypeInfoPaths = {
+			"/definitely/missing/windows.json"};
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto typeConfig = std::make_shared<ctypesparser::TypeConfig>();
+
+	EXPECT_THROW(
+			Lti(module.get(), &config, typeConfig, image.getImage()),
+			std::runtime_error);
+}
+
 //
 //=============================================================================
 //  LtiProviderTests

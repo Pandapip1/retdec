@@ -5,6 +5,7 @@
  */
 
 #include <fstream>
+#include <stdexcept>
 
 #include "retdec/ctypes/floating_point_type.h"
 #include "retdec/ctypes/function_type.h"
@@ -94,15 +95,17 @@ Lti::Lti(
 void Lti::loadLtiFile(const std::string& filePath)
 {
 	std::ifstream file(filePath);
-	if (file)
+	if (!file)
 	{
-		std::string cc = "cdecl";
-		if (retdec::utils::containsCaseInsensitive(filePath, "win"))
-		{
-			cc = "stdcall";
-		}
-		_ltiParser.parseInto(file, _ltiModule, _typeConfig->typeWidths(), cc);
+		throw std::runtime_error(
+				"could not open configured library type information: " + filePath);
 	}
+	std::string cc = "cdecl";
+	if (retdec::utils::containsCaseInsensitive(filePath, "win"))
+	{
+		cc = "stdcall";
+	}
+	_ltiParser.parseInto(file, _ltiModule, _typeConfig->typeWidths(), cc);
 }
 
 bool Lti::hasLtiFunction(const std::string& name)

@@ -59,6 +59,10 @@ target_include_directories(tests-bin2llvmir
 		${RETDEC_TESTS_DIR}
 )
 
+target_compile_definitions(tests-bin2llvmir PRIVATE
+	"RETDEC_TEST_WINDOWS_TYPES=\"${RETDEC_SUPPORT_DIR}/types/windows.json\""
+)
+
 target_link_libraries(tests-bin2llvmir
 	retdec::bin2llvmir
 	retdec::pe32-runtime
