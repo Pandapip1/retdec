@@ -10,6 +10,22 @@ if(NOT result EQUAL 0)
 		"retdec-decompiler rejected --pe32-pointer-bridge: ${error}")
 endif()
 
+file(STRINGS "${RETDEC_DEFAULT_CONFIG}" type_info_paths
+	REGEX "support/types/.*\\.json")
+list(LENGTH type_info_paths type_info_path_count)
+if(NOT type_info_path_count EQUAL 5)
+	message(FATAL_ERROR
+		"build-tree config does not contain five source LTI paths: ${type_info_paths}")
+endif()
+foreach(type_info_path_line IN LISTS type_info_paths)
+	string(REGEX REPLACE "^[^\"]*\"([^\"]+)\".*$" "\\1"
+		type_info_path "${type_info_path_line}")
+	if(NOT EXISTS "${type_info_path}")
+		message(FATAL_ERROR
+			"build-tree config references missing LTI data: ${type_info_path}")
+	endif()
+endforeach()
+
 foreach(required
 		"--pe32-pointer-bridge"
 		"--emit-lifted-dwarf"
