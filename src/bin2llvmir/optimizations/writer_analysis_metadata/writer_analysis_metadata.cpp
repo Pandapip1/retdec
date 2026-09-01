@@ -476,6 +476,8 @@ bool AnalysisMetadataWriter::runOnModule(llvm::Module& module)
 	key(writer, "input");
 	writer.StartObject();
 	key(writer, "path"); writer.String(config->getConfig().parameters.getInputFile().c_str());
+	key(writer, "size"); writer.Uint64(format->getFileLength());
+	key(writer, "sha256"); writer.String(format->getSha256().c_str());
 	key(writer, "architecture"); writer.String(config->getConfig().architecture.getName().c_str());
 	key(writer, "bits"); writer.Uint64(config->getConfig().architecture.getBitSize());
 	std::uint64_t imageBase = 0;
