@@ -59,6 +59,7 @@ add_library(bin2llvmir STATIC
 	optimizations/stack/stack.cpp
 	optimizations/stack_pointer_ops/stack_pointer_ops.cpp
 	optimizations/value_protect/value_protect.cpp
+	optimizations/writer_analysis_metadata/writer_analysis_metadata.cpp
 	optimizations/writer_bc/writer_bc.cpp
 	optimizations/writer_config/writer_config.cpp
 	optimizations/writer_dsm/writer_dsm.cpp

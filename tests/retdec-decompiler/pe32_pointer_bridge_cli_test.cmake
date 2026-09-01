@@ -13,6 +13,8 @@ endif()
 foreach(required
 		"--pe32-pointer-bridge"
 		"--emit-lifted-dwarf"
+		"--analysis-metadata"
+		"--stop-after analysis|bin2llvmir"
 		"__retdec_pe32_host_to_guest"
 		"__retdec_pe32_guest_to_host")
 	string(FIND "${output}" "${required}" found)

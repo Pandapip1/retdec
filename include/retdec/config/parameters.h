@@ -59,6 +59,7 @@ class Parameters
 		void setOutputAsmFile(const std::string& file);
 		void setOutputLlvmirFile(const std::string& file);
 		void setOutputConfigFile(const std::string& file);
+		void setOutputAnalysisMetadataFile(const std::string& file);
 		void setOutputUnpackedFile(const std::string& file);
 		void setOutputFormat(const std::string& format);
 		void setLogFile(const std::string& file);
@@ -97,6 +98,7 @@ class Parameters
 		const std::string& getOutputAsmFile() const;
 		const std::string& getOutputLlvmirFile() const;
 		const std::string& getOutputConfigFile() const;
+		const std::string& getOutputAnalysisMetadataFile() const;
 		const std::string& getOutputUnpackedFile() const;
 		const std::string& getOutputFormat() const;
 		const std::string& getLogFile() const;
@@ -162,6 +164,7 @@ class Parameters
 		std::string _outputAsmFile;
 		std::string _outputLlFile;
 		std::string _outputConfigFile;
+		std::string _outputAnalysisMetadataFile;
 		std::string _outputUnpackedFile;
 		std::string _outputFormat;
 		std::string _logFile;
