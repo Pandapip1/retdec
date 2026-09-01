@@ -152,6 +152,34 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 			source.access = CS_AC_READ;
 		}
 
+		void setMoveRegisterToMemory(
+				SyntheticInstruction& instruction,
+				std::uint64_t address,
+				x86_reg base,
+				x86_reg index,
+				int scale,
+				std::int64_t displacement,
+				x86_reg sourceRegister)
+		{
+			instruction.instruction.address = address;
+			instruction.instruction.size = 3;
+			instruction.instruction.id = X86_INS_MOV;
+			instruction.detail.x86.op_count = 2;
+			auto& destination = instruction.detail.x86.operands[0];
+			destination.type = X86_OP_MEM;
+			destination.mem.base = base;
+			destination.mem.index = index;
+			destination.mem.scale = scale;
+			destination.mem.disp = displacement;
+			destination.size = 4;
+			destination.access = CS_AC_WRITE;
+			auto& source = instruction.detail.x86.operands[1];
+			source.type = X86_OP_REG;
+			source.reg = sourceRegister;
+			source.size = 4;
+			source.access = CS_AC_READ;
+		}
+
 		void setMoveRegister(
 				SyntheticInstruction& instruction,
 				std::uint64_t address,
@@ -353,11 +381,13 @@ TEST_F(AnalysisMetadataWriterTests, TracesImportedReturnThroughStackAndIndexedLo
 			store volatile i64 4112, i64* @llvm2asm
 			store volatile i64 4115, i64* @llvm2asm
 			store volatile i64 4118, i64* @llvm2asm
+			store volatile i64 4121, i64* @llvm2asm
+			store volatile i64 4126, i64* @llvm2asm
 			ret void
 		}
 	)");
 
-	std::array<SyntheticInstruction, 5> decoded;
+	std::array<SyntheticInstruction, 7> decoded;
 	setCall(decoded[0], 0x1000, 0x3000);
 	setMoveRegisterToStack(decoded[1], 0x1005, -4, X86_REG_EAX);
 	setMoveMemoryToRegister(
@@ -369,12 +399,18 @@ TEST_F(AnalysisMetadataWriterTests, TracesImportedReturnThroughStackAndIndexedLo
 	setMoveMemoryToRegister(
 			decoded[4], 0x1016, X86_REG_ESI,
 			X86_REG_EDX, X86_REG_EAX, 4, 16);
+	setCall(decoded[5], 0x1019, 0x4000);
+	setMoveRegisterToMemory(
+			decoded[6], 0x101e, X86_REG_ESI, X86_REG_ESI, 2, 32,
+			X86_REG_EAX);
 	mapInstructions({
 			&decoded[0].instruction,
 			&decoded[1].instruction,
 			&decoded[2].instruction,
 			&decoded[3].instruction,
-			&decoded[4].instruction});
+			&decoded[4].instruction,
+			&decoded[5].instruction,
+			&decoded[6].instruction});
 
 	const std::array<std::uint8_t, 1> input = {{0}};
 	auto format = std::make_shared<TestFormat>(input.data(), input.size());
@@ -386,7 +422,7 @@ TEST_F(AnalysisMetadataWriterTests, TracesImportedReturnThroughStackAndIndexedLo
 	const auto& flow = metadata["functions"][0]["value_flow"];
 	ASSERT_TRUE(flow.IsObject());
 	const auto& definitions = flow["definitions"];
-	ASSERT_EQ(5u, definitions.Size());
+	ASSERT_EQ(7u, definitions.Size());
 
 	EXPECT_EQ(0x1000u, definitions[0]["address"].GetUint64());
 	EXPECT_STREQ("call_return", definitions[0]["operation"].GetString());
@@ -408,6 +444,25 @@ TEST_F(AnalysisMetadataWriterTests, TracesImportedReturnThroughStackAndIndexedLo
 	EXPECT_STREQ("index", definitions[4]["inputs"][1]["role"].GetString());
 	EXPECT_EQ(0x1000u,
 			definitions[4]["inputs"][1]["definition"].GetUint64());
+	EXPECT_STREQ("call_return", definitions[5]["operation"].GetString());
+	EXPECT_EQ(0x4000u, definitions[5]["call_target"].GetUint64());
+	EXPECT_STREQ("pointer_store", definitions[6]["operation"].GetString());
+	const auto& destination = definitions[6]["destination"];
+	EXPECT_STREQ("memory", destination["kind"].GetString());
+	EXPECT_STREQ("esi", destination["base"].GetString());
+	EXPECT_STREQ("esi", destination["index"].GetString());
+	EXPECT_EQ(2, destination["scale"].GetInt());
+	EXPECT_EQ(32, destination["displacement"].GetInt64());
+	ASSERT_EQ(3u, definitions[6]["inputs"].Size());
+	EXPECT_STREQ("base", definitions[6]["inputs"][0]["role"].GetString());
+	EXPECT_EQ(0x1016u,
+			definitions[6]["inputs"][0]["definition"].GetUint64());
+	EXPECT_STREQ("index", definitions[6]["inputs"][1]["role"].GetString());
+	EXPECT_EQ(0x1016u,
+			definitions[6]["inputs"][1]["definition"].GetUint64());
+	EXPECT_STREQ("value", definitions[6]["inputs"][2]["role"].GetString());
+	EXPECT_EQ(0x1019u,
+			definitions[6]["inputs"][2]["definition"].GetUint64());
 	EXPECT_TRUE(flow["ambiguous_merges"].Empty());
 }
 
@@ -427,20 +482,25 @@ TEST_F(AnalysisMetadataWriterTests, AmbiguousMergeStopsValueFlow)
 			br label %dec_label_pc_2030
 		dec_label_pc_2030:
 			store volatile i64 8240, i64* @llvm2asm
+			store volatile i64 8243, i64* @llvm2asm
 			ret void
 		}
 	)");
 
-	std::array<SyntheticInstruction, 4> decoded;
+	std::array<SyntheticInstruction, 5> decoded;
 	setCall(decoded[0], 0x2000, 0x3000);
 	setMoveRegister(decoded[1], 0x2010, X86_REG_ECX, X86_REG_EAX);
 	setMoveRegister(decoded[2], 0x2020, X86_REG_ECX, X86_REG_EAX);
 	setMoveRegister(decoded[3], 0x2030, X86_REG_EDX, X86_REG_ECX);
+	setMoveRegisterToMemory(
+			decoded[4], 0x2033, X86_REG_ECX, X86_REG_INVALID, 1, 8,
+			X86_REG_EAX);
 	mapInstructions({
 			&decoded[0].instruction,
 			&decoded[1].instruction,
 			&decoded[2].instruction,
-			&decoded[3].instruction});
+			&decoded[3].instruction,
+			&decoded[4].instruction});
 
 	const std::array<std::uint8_t, 1> input = {{0}};
 	auto format = std::make_shared<TestFormat>(input.data(), input.size());
