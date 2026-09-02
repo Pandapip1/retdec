@@ -130,6 +130,7 @@ class CallEntry : public CallableEntry
 		void setRetValues(std::vector<llvm::Value*>&& values);
 
 		void addDirectArgStore(llvm::StoreInst* store);
+		void addDirectArgument(llvm::Value* value);
 		void addProvenStackArgStore(llvm::StoreInst* store);
 		void addObsoleteStackArgStore(llvm::StoreInst* store);
 		void addObsoleteStackCleanupMarker(llvm::StoreInst* marker);

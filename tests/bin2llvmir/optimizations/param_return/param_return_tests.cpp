@@ -875,6 +875,124 @@ TEST_F(ParamReturnTests, x86CalleeCleanupPrefersDecodedPushOverLaterLocalWrite)
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(ParamReturnTests, x86FixedCallMergesOldestPushFromPredecessors)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare void @consume()
+		define void @caller(i1 %condition, i32 %left, i32 %right, i32 %heap) {
+		entry:
+			%stack_arg1 = alloca i32
+			%stack_arg2 = alloca i32
+			%stack_arg3 = alloca i32
+			br i1 %condition, label %left_path, label %right_path
+		left_path:
+			store volatile i64 4096, i64* @llvm2asm
+			store i32 %left, i32* %stack_arg3
+			%left_esp = ptrtoint i32* %stack_arg3 to i32
+			store i32 %left_esp, i32* @esp
+			br label %invoke
+		right_path:
+			store volatile i64 4097, i64* @llvm2asm
+			store i32 %right, i32* %stack_arg3
+			%right_esp = ptrtoint i32* %stack_arg3 to i32
+			store i32 %right_esp, i32* @esp
+			br label %invoke
+		invoke:
+			store volatile i64 4098, i64* @llvm2asm
+			store i32 0, i32* %stack_arg2
+			store volatile i64 4099, i64* @llvm2asm
+			store i32 %heap, i32* %stack_arg1
+			store volatile i64 4100, i64* @llvm2asm
+			call void @consume()
+			ret void
+		}
+	)");
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto callerConfig = retdec::common::Function("caller");
+	callerConfig.locals.insert(retdec::common::Object(
+			"stack_arg1", retdec::common::Storage::onStack(-4)));
+	callerConfig.locals.insert(retdec::common::Object(
+			"stack_arg2", retdec::common::Storage::onStack(-8)));
+	callerConfig.locals.insert(retdec::common::Object(
+			"stack_arg3", retdec::common::Storage::onStack(-12)));
+	config.getConfig().functions.insert(callerConfig);
+	auto consumeConfig = retdec::common::Function("consume");
+	consumeConfig.setIsUserDefined();
+	for (const char* name : {"heap", "flags", "size"})
+	{
+		retdec::common::Object parameter(name, retdec::common::Storage());
+		parameter.type.setLlvmIr("i32");
+		consumeConfig.parameters.push_back(parameter);
+	}
+	config.getConfig().functions.insert(consumeConfig);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	AsmInstruction::setLlvmToAsmGlobalVariable(
+			module.get(), module->getGlobalVariable("llvm2asm"));
+	cs_insn decoded[5] = {};
+	for (unsigned i = 0; i < 5; ++i)
+	{
+		decoded[i].id = i == 4 ? X86_INS_CALL : X86_INS_PUSH;
+		decoded[i].address = 0x1000 + i;
+		decoded[i].size = 1;
+	}
+	unsigned markerIndex = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* marker = dyn_cast<StoreInst>(&instruction);
+		if (marker != nullptr && marker->getPointerOperand()
+				== module->getGlobalVariable("llvm2asm"))
+		{
+			ASSERT_LT(markerIndex, 5u);
+			AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
+					= &decoded[markerIndex++];
+		}
+	}
+	ASSERT_EQ(5u, markerIndex);
+	auto* caller = module->getFunction("caller");
+	auto* left = &*std::next(caller->arg_begin(), 1);
+	auto* right = &*std::next(caller->arg_begin(), 2);
+	auto* heap = &*std::next(caller->arg_begin(), 3);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto ltiTypeConfig = std::make_shared<ctypesparser::TypeConfig>();
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, ltiTypeConfig, image.getImage());
+
+	pass.runOnModuleCustom(
+			*module, &config, abi, demangler, &image, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	CallInst* recoveredCall = nullptr;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* candidate = dyn_cast<CallInst>(&instruction);
+		if (candidate != nullptr && candidate->getCalledFunction() == consume)
+		{
+			recoveredCall = candidate;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(3u, recoveredCall->arg_size());
+	EXPECT_EQ(heap, recoveredCall->getArgOperand(0));
+	EXPECT_TRUE(cast<ConstantInt>(recoveredCall->getArgOperand(1))->isZero());
+	auto* merged = dyn_cast<PHINode>(recoveredCall->getArgOperand(2));
+	ASSERT_NE(nullptr, merged);
+	ASSERT_EQ(2u, merged->getNumIncomingValues());
+	EXPECT_TRUE((merged->getIncomingValue(0) == left
+			&& merged->getIncomingValue(1) == right)
+			|| (merged->getIncomingValue(0) == right
+					&& merged->getIncomingValue(1) == left));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
 {
 	parseInput(R"(

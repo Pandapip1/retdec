@@ -387,6 +387,12 @@ void CallEntry::addDirectArgStore(StoreInst* store)
 	_directArgStores.insert(store);
 }
 
+void CallEntry::addDirectArgument(Value* value)
+{
+	_args.push_back(value);
+	_directArgOrigins.emplace_back(value, value);
+}
+
 void CallEntry::addProvenStackArgStore(StoreInst* store)
 {
 	_provenStackArgStores.insert(store);

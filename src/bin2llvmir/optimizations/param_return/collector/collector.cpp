@@ -221,6 +221,8 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	std::vector<StoreInst*> stores;
 	std::set<StoreInst*> directStores;
 	std::set<StoreInst*> provenStores;
+	std::vector<StoreInst*> mergedPushStores;
+	Value* mergedPushValue = nullptr;
 	std::set<Value*> disqualifiedValues;
 	Value* pendingStackPointer = nullptr;
 	unsigned nestedCleanupBytes = 0;
@@ -470,6 +472,118 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 		}
 	}
 
+	// A fixed-arity x86 call may share its oldest PUSH across several incoming
+	// CFG edges while the remaining PUSHes live in the call block. Follow that
+	// join only when exactly one physical word is missing and every predecessor
+	// ends by writing a decoded PUSH to the same recovered stack slot. This is
+	// deliberately fail-closed: different slots, intervening calls, wide
+	// parameters, or more than one missing word remain unresolved.
+	const auto& fixedTypes = ce->getBaseFunction()->argTypes();
+	bool singleWordTypes = slotSize != 0 && !fixedTypes.empty()
+			&& std::all_of(
+					fixedTypes.begin(), fixedTypes.end(),
+					[this, slotSize](Type* type)
+					{
+						return type != nullptr && type->isSized()
+								&& _module->getDataLayout().getTypeStoreSize(type)
+										<= slotSize;
+					});
+	if (singleWordTypes && provenStores.size() + 1 == fixedTypes.size()
+			&& pred_size(block) > 1)
+	{
+		Value* commonSlot = nullptr;
+		Type* commonType = nullptr;
+		std::vector<std::pair<BasicBlock*, StoreInst*>> incomingPushes;
+		for (BasicBlock* predecessor : predecessors(block))
+		{
+			StoreInst* pushStore = nullptr;
+			for (auto it = predecessor->rbegin(); it != predecessor->rend(); ++it)
+			{
+				if (auto* priorCall = dyn_cast<CallInst>(&*it))
+				{
+					auto* callee = priorCall->getCalledFunction();
+					if (callee == nullptr || !callee->isIntrinsic())
+					{
+						break;
+					}
+				}
+				auto* store = dyn_cast<StoreInst>(&*it);
+				if (store == nullptr
+						|| AsmInstruction::isLlvmToAsmInstruction(store))
+				{
+					continue;
+				}
+				AsmInstruction decoded(store);
+				auto* capstone = decoded.isValid()
+						? decoded.getCapstoneInsn() : nullptr;
+				if (capstone == nullptr || capstone->id != X86_INS_PUSH)
+				{
+					continue;
+				}
+				// A decoded PUSH writes both the outgoing stack word and ESP. The
+				// latter commonly follows the argument store in lifted IR, so skip
+				// it while looking backwards for the actual pushed value.
+				if (_abi->isStackPointerRegister(store->getPointerOperand()))
+				{
+					continue;
+				}
+				if (_abi->isStackVariable(store->getPointerOperand()))
+				{
+					pushStore = store;
+				}
+				break;
+			}
+			if (pushStore == nullptr)
+			{
+				incomingPushes.clear();
+				break;
+			}
+			Value* slot = pushStore->getPointerOperand()->stripPointerCasts();
+			Type* valueType = pushStore->getValueOperand()->getType();
+			if ((commonSlot != nullptr && commonSlot != slot)
+					|| (commonType != nullptr && commonType != valueType))
+			{
+				incomingPushes.clear();
+				break;
+			}
+			commonSlot = slot;
+			commonType = valueType;
+			incomingPushes.emplace_back(predecessor, pushStore);
+		}
+
+		if (!incomingPushes.empty())
+		{
+			Value* firstValue = incomingPushes.front().second->getValueOperand();
+			bool sameValue = std::all_of(
+					incomingPushes.begin(), incomingPushes.end(),
+					[firstValue](const auto& incoming)
+					{
+						return incoming.second->getValueOperand() == firstValue;
+					});
+			if (sameValue)
+			{
+				mergedPushValue = firstValue;
+			}
+			else
+			{
+				auto* insertion = &*block->getFirstInsertionPt();
+				auto* phi = PHINode::Create(
+						commonType, incomingPushes.size(),
+						"merged.stack.argument", insertion);
+				for (const auto& incoming : incomingPushes)
+				{
+					phi->addIncoming(
+							incoming.second->getValueOperand(), incoming.first);
+				}
+				mergedPushValue = phi;
+			}
+			for (const auto& incoming : incomingPushes)
+			{
+				mergedPushStores.push_back(incoming.second);
+			}
+		}
+	}
+
 	if (cleanupBytes != 0 && slotSize != 0)
 	{
 		auto candidateBytes = [&](StoreInst* store) -> uint64_t
@@ -546,6 +660,7 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	// make us sort the decoded PUSH prefix by frame offset: PUSH traversal order
 	// is the native argument order even when older stack stores follow it.
 	ce->preserveNativeStackOrder(!directStores.empty()
+			|| mergedPushValue != nullptr
 			|| (hasProvenStack && allProvenStackStoresAreDecodedPushes));
 	if (ce->preservesNativeStackOrder() && hasProvenStack)
 	{
@@ -584,6 +699,14 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 		}
 	}
 	ce->setArgStores(std::move(stores));
+	if (mergedPushValue != nullptr)
+	{
+		ce->addDirectArgument(mergedPushValue);
+		for (auto* store : mergedPushStores)
+		{
+			ce->addObsoleteStackArgStore(store);
+		}
+	}
 }
 
 void Collector::collectCallRets(CallEntry* ce) const
