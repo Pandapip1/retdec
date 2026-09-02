@@ -36,6 +36,7 @@ class StackAnalysis : public llvm::ModulePass
 
 	private:
 		bool run();
+		bool foldAdjacentDecodedPushPop(llvm::Function& function);
 		void computeDecodedStackDeltas(llvm::Function& function);
 		std::optional<int> getDecodedIncomingStackOffset(
 				llvm::Instruction* instruction) const;

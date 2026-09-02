@@ -292,6 +292,53 @@ TEST_F(StackAnalysisTests, localizesImplicitPopReadOfSavedRegister)
 			module->getFunction("func"), -4), load->getPointerOperand());
 }
 
+TEST_F(StackAnalysisTests, foldsAdjacentPushPopTemporaryWithoutKnownStackDelta)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare void @unknown_stack_cleanup()
+		define i32 @func() {
+		entry:
+			call void @unknown_stack_cleanup()
+			store volatile i64 4096, i64* @llvm2asm
+			%push.sp = load i32, i32* @esp
+			%pushed.sp = sub i32 %push.sp, 4
+			%push.pointer = inttoptr i32 %pushed.sp to i32*
+			store i32 -10, i32* %push.pointer
+			store i32 %pushed.sp, i32* @esp
+			store volatile i64 4097, i64* @llvm2asm
+			%pop.sp = load i32, i32* @esp
+			%pop.pointer = inttoptr i32 %pop.sp to i32*
+			%popped.value = load i32, i32* %pop.pointer
+			%popped.sp = add i32 %pop.sp, 4
+			store i32 %popped.sp, i32* @esp
+			ret i32 %popped.value
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().registers.insert(retdec::common::Object(
+			"esp", retdec::common::Storage::inRegister("esp")));
+	auto* abi = addX86Abi(config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	SymbolicTree::setAbi(abi);
+	SymbolicTree::setConfig(&config);
+
+	std::vector<SyntheticInstruction> decoded(2);
+	setSimpleInstruction(decoded[0], X86_INS_PUSH);
+	setSimpleInstruction(decoded[1], X86_INS_POP, X86_REG_EAX);
+	mapSyntheticInstructions(decoded);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+	auto* result = cast<ReturnInst>(&module->getFunction("func")->back().back())
+			->getReturnValue();
+	auto* constant = dyn_cast<ConstantInt>(result);
+	ASSERT_NE(nullptr, constant);
+	EXPECT_EQ(-10, constant->getSExtValue());
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(StackAnalysisTests, reconstructsIndexedFrameRelativeStackObject)
 {
 	parseInput(R"(

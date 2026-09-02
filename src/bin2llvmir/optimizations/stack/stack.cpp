@@ -341,18 +341,29 @@ bool StackAnalysis::run()
 		return false;
 	}
 
-	ReachingDefinitionsAnalysis RDA;
-	RDA.runOnModule(*_module, _abi);
+	_toRemove.clear();
 	_decodedStackDeltas.clear();
 
+	bool changed = false;
 	for (auto& f : *_module)
 	{
 		computeDecodedStackDeltas(f);
+		changed |= foldAdjacentDecodedPushPop(f);
+	}
+
+	ReachingDefinitionsAnalysis RDA;
+	RDA.runOnModule(*_module, _abi);
+	for (auto& f : *_module)
+	{
 		std::map<Value*, Value*> val2val;
 		for (inst_iterator I = inst_begin(f), E = inst_end(f); I != E;)
 		{
 			Instruction& i = *I;
 			++I;
+			if (_toRemove.count(&i) != 0)
+			{
+				continue;
+			}
 
 			if (StoreInst *store = dyn_cast<StoreInst>(&i))
 			{
@@ -399,7 +410,113 @@ bool StackAnalysis::run()
 
 	IrModifier::eraseUnusedInstructionsRecursive(_toRemove);
 
-	return reconstructDynamicStackAccesses();
+	return reconstructDynamicStackAccesses() || changed;
+}
+
+/**
+ * Fold an adjacent decoded @c PUSH value / @c POP register pair to SSA.
+ *
+ * Compilers use this flag-preserving pair as a constant/register move. When a
+ * function's absolute stack delta is unavailable (for example after a call
+ * with unknown cleanup), neither implicit memory access can be assigned a
+ * frame offset. Native adjacency nevertheless proves that the POP reads the
+ * word just written by the PUSH: there is no intervening instruction or CFG
+ * edge that can observe or overwrite it.
+ *
+ * The matcher intentionally requires one full machine-word memory store and
+ * load, identical LLVM value types, a non-ESP POP destination, one basic block,
+ * and contiguous decoded addresses. Any irregularity is left untouched.
+ */
+bool StackAnalysis::foldAdjacentDecodedPushPop(Function& function)
+{
+	if (!_config->getConfig().architecture.isX86_32())
+	{
+		return false;
+	}
+
+	uint64_t slotSize = _config->getConfig().architecture.getByteSize();
+	bool changed = false;
+	for (Instruction& instruction : instructions(function))
+	{
+		auto* marker = dyn_cast<StoreInst>(&instruction);
+		if (marker == nullptr || !AsmInstruction::isLlvmToAsmInstruction(marker))
+		{
+			continue;
+		}
+		AsmInstruction push(marker);
+		auto* pushDecoded = push.getCapstoneInsn();
+		if (pushDecoded == nullptr || pushDecoded->id != X86_INS_PUSH)
+		{
+			continue;
+		}
+
+		AsmInstruction pop = push.getNext();
+		auto* popDecoded = pop.isValid() ? pop.getCapstoneInsn() : nullptr;
+		if (popDecoded == nullptr || popDecoded->id != X86_INS_POP
+				|| push.getBasicBlock() != pop.getBasicBlock()
+				|| push.getEndAddress() != pop.getAddress()
+				|| popDecoded->detail == nullptr)
+		{
+			continue;
+		}
+		auto& operands = popDecoded->detail->x86;
+		if (operands.op_count != 1 || operands.operands[0].type != X86_OP_REG
+				|| operands.operands[0].reg == X86_REG_ESP)
+		{
+			continue;
+		}
+
+		StoreInst* pushedWord = nullptr;
+		for (Instruction* candidate : push.getInstructions())
+		{
+			auto* store = dyn_cast<StoreInst>(candidate);
+			if (store == nullptr || store->isVolatile() || store->isAtomic()
+					|| isa<GlobalVariable>(store->getPointerOperand())
+					|| !store->getValueOperand()->getType()->isSized()
+					|| _module->getDataLayout().getTypeStoreSize(
+							store->getValueOperand()->getType()) != slotSize)
+			{
+				continue;
+			}
+			if (pushedWord != nullptr)
+			{
+				pushedWord = nullptr;
+				break;
+			}
+			pushedWord = store;
+		}
+
+		LoadInst* poppedWord = nullptr;
+		for (Instruction* candidate : pop.getInstructions())
+		{
+			auto* load = dyn_cast<LoadInst>(candidate);
+			if (load == nullptr || load->isVolatile() || load->isAtomic()
+					|| isa<GlobalVariable>(load->getPointerOperand())
+					|| !load->getType()->isSized()
+					|| _module->getDataLayout().getTypeStoreSize(load->getType())
+							!= slotSize)
+			{
+				continue;
+			}
+			if (poppedWord != nullptr)
+			{
+				poppedWord = nullptr;
+				break;
+			}
+			poppedWord = load;
+		}
+
+		if (pushedWord == nullptr || poppedWord == nullptr
+				|| pushedWord->getValueOperand()->getType() != poppedWord->getType())
+		{
+			continue;
+		}
+		poppedWord->replaceAllUsesWith(pushedWord->getValueOperand());
+		_toRemove.insert(pushedWord);
+		_toRemove.insert(poppedWord);
+		changed = true;
+	}
+	return changed;
 }
 
 /**
