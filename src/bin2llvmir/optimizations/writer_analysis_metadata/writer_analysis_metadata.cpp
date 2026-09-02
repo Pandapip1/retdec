@@ -499,8 +499,10 @@ struct ValueFlowRecord
 	std::uint64_t address = 0;
 	std::string operation;
 	ValueLocation destination;
+	ValueLocation source;
 	unsigned int size = 0;
 	std::vector<ValueFlowInput> inputs;
+	bool hasSource = false;
 	bool importedCallReturn = false;
 	bool hasCallTarget = false;
 	std::uint64_t callTarget = 0;
@@ -510,8 +512,10 @@ struct ValueFlowRecord
 
 struct ValueFlowAmbiguity
 {
+	std::uint64_t use = 0;
 	std::uint64_t block = 0;
 	ValueLocation location;
+	std::string role;
 	DefinitionSet candidates;
 };
 
@@ -827,13 +831,16 @@ void addInput(
 	const auto duplicate = std::any_of(
 			ambiguities.begin(), ambiguities.end(),
 			[&](const ValueFlowAmbiguity& ambiguity) {
-				return ambiguity.block == block
+				return ambiguity.use == record.address
+						&& ambiguity.block == block
 						&& ambiguity.location == location
+						&& ambiguity.role == role
 						&& ambiguity.candidates == found->second;
 			});
 	if (!duplicate)
 	{
-		ambiguities.push_back({block, location, found->second});
+		ambiguities.push_back({
+				record.address, block, location, role, found->second});
 	}
 }
 
@@ -985,12 +992,16 @@ ValueFlowRecord describeDefinition(
 			if (stackLocation(handle, source, bits, stack))
 			{
 				record.operation = "stack_load";
+				record.hasSource = true;
+				record.source = stack;
 				addInput(record, state, stack, "value", ambiguities, block);
 			}
 			else
 			{
 				record.operation = source.mem.index == X86_REG_INVALID
 						? "pointer_load" : "indexed_load";
+				record.hasSource = true;
+				record.source = memoryLocation(handle, source, bits);
 				addMemoryInputs(record, state, handle, source, bits,
 						ambiguities, block);
 			}
@@ -1005,6 +1016,8 @@ ValueFlowRecord describeDefinition(
 			&& x86.operands[1].type == X86_OP_MEM)
 	{
 		record.operation = "address";
+		record.hasSource = true;
+		record.source = memoryLocation(handle, x86.operands[1], bits);
 		addMemoryInputs(record, state, handle, x86.operands[1], bits,
 				ambiguities, block);
 		return record;
@@ -1158,7 +1171,9 @@ ValueFlowResult analyzeValueFlow(
 
 	for (const auto& item : result.records)
 	{
-		if (item.second.importedCallReturn)
+		if (item.second.importedCallReturn
+				|| (item.second.operation == "pointer_store"
+						&& item.second.hasStoredImmediate))
 		{
 			result.interesting.insert(item.first);
 		}
@@ -1241,6 +1256,11 @@ void writeValueFlow(Writer& writer, const ValueFlowResult& flow)
 		key(writer, "operation"); writer.String(record.operation.c_str());
 		key(writer, "destination");
 		writeValueLocation(writer, record.destination, record.size);
+		if (record.hasSource)
+		{
+			key(writer, "source");
+			writeValueLocation(writer, record.source);
+		}
 		if (record.hasCallTarget)
 		{
 			key(writer, "call_target"); address(writer, record.callTarget);
@@ -1267,18 +1287,21 @@ void writeValueFlow(Writer& writer, const ValueFlowResult& flow)
 	writer.StartArray();
 	for (const auto& ambiguity : flow.ambiguities)
 	{
-		const auto hasInteresting = std::any_of(
+		const auto hasInterestingCandidate = std::any_of(
 				ambiguity.candidates.begin(), ambiguity.candidates.end(),
 				[&](std::uint64_t definition) {
 					return flow.interesting.count(definition) != 0;
 				});
-		if (!hasInteresting)
+		if (flow.interesting.count(ambiguity.use) == 0
+				&& !hasInterestingCandidate)
 		{
 			continue;
 		}
 		writer.StartObject();
+		key(writer, "use"); address(writer, ambiguity.use);
 		key(writer, "block"); address(writer, ambiguity.block);
 		key(writer, "location"); writeValueLocation(writer, ambiguity.location);
+		key(writer, "role"); writer.String(ambiguity.role.c_str());
 		key(writer, "candidate_definitions");
 		writer.StartArray();
 		for (const auto definition : ambiguity.candidates)

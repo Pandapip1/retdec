@@ -18,7 +18,7 @@ The top-level schema is "retdec-analysis-metadata-v1". Version 1 contains:
 - decoded instruction addresses, sizes, mnemonics, text, and normalized x86
   operands;
 - a compact, per-function value-flow slice rooted at imported-call return
-  values;
+  values and immediate memory publications;
 - classified code, data, and import references.
 
 Addresses are unsigned JSON integers. Signed immediate values and memory
@@ -54,12 +54,16 @@ families, scale, signed displacement, and access width. The recorded size
 remains the width of the actual write.
 
 The emitted definitions are a demand-independent backward graph, compacted to
-the slice transitively derived from imported calls. A `call_return` is a root
-only when its direct target is an import address or a structurally recovered
-import thunk. Its `call_target` therefore joins directly to the top-level
-`imports` or `import_thunks` relation. Each subsequent definition has zero or
-more `inputs`; an input's `definition` is another machine-instruction address
-and its `role` describes how it participates:
+the union of two generic slices: values transitively derived from imported
+calls, and immediate values published through non-stack memory writes. A
+`call_return` is a root only when its direct target is an import address or a
+structurally recovered import thunk. Its `call_target` therefore joins directly
+to the top-level `imports` or `import_thunks` relation. Every immediate
+`pointer_store` is also a root, irrespective of the immediate's value. This
+exposes machine-written descriptors and callback vectors without assigning
+either construct a domain-specific meaning. Each definition has zero or more
+`inputs`; an input's `definition` is another machine-instruction address and
+its `role` describes how it participates:
 
 - `value` for register copies and stack spill/reload values;
 - `base` for a pointer's base-register definition;
@@ -68,27 +72,34 @@ and its `role` describes how it participates:
 
 Operations are `call_return`, `copy`, `stack_store`, `stack_load`,
 `pointer_load`, `indexed_load`, `address`, `constant`, and `transform`.
-Instruction operands remain the source of scale, displacement, and immediate
-details for value-producing loads. `pointer_store` is a terminal effect rather
+Value-producing memory loads and `address` operations contain a normalized
+`source` location with base, index, scale, and displacement. In particular, a
+`stack_load` with no `value` input names the function-entry stack location from
+which the value was read. Consumers can therefore follow two different
+register-copy chains back to the same entry-stack root without decoding or
+matching adjacent instructions. `pointer_store` is a terminal effect rather
 than an alias-analysis definition: its destination records base, index, scale,
 displacement, and width directly; its inputs independently identify the
-unambiguous `base`, `index`, and stored `value` definitions. An immediate
-stored value is emitted as `stored_immediate`.
+unambiguous `base`, `index`, and stored `value` definitions. An immediate stored
+value is emitted as `stored_immediate`.
 
-Only stores whose unambiguous base or index provenance descends from an
-imported return are retained. A retained store includes the complete
-unambiguous provenance of its address operands and stored value, even when an
-operand itself does not descend from that imported return. This operand
-closure does not seed other downstream effects, and every emitted `definition`
-edge names another emitted record.
+All immediate non-stack stores are retained. Other stores are retained only
+when their unambiguous base or index provenance descends from an imported
+return. A retained store includes the complete unambiguous provenance of its
+address operands and stored value, even when an operand itself does not descend
+from that imported return. This operand closure does not seed unrelated
+downstream effects, and every emitted `definition` edge names another emitted
+record.
 
 The analysis propagates reaching definitions across recovered CFG edges. At a
 merge it emits an edge only when all incoming paths agree on the same
 definition. Otherwise it stops that value chain and adds an `ambiguous_merges`
-entry containing the location, candidate definitions, and whether any path was
-undefined. Consumers must not choose a candidate or synthesize a phi node from
-this entry. This fail-closed rule also applies to stack locations invalidated
-by stack-pointer changes and to unsupported machine writes.
+entry containing the use address and role, location, candidate definitions, and
+whether any path was undefined. Ambiguities are retained when either their use
+or one of their candidates belongs to an emitted slice. Consumers must not
+choose a candidate or synthesize a phi node from this entry. This fail-closed
+rule also applies to stack locations invalidated by stack-pointer changes and
+to unsupported machine writes.
 
 For example, a consumer can join an imported `call_return` to a later
 `pointer_load` through its `base` input, through `stack_store`/`stack_load`
