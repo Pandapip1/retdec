@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -1320,6 +1321,49 @@ void writeValueFlow(Writer& writer, const ValueFlowResult& flow)
 	writer.EndObject();
 }
 
+std::uint64_t recoveredFunctionEnd(
+		llvm::Function& function,
+		std::uint64_t start,
+		const BlockInstructions& blockInstructions)
+{
+	const auto configured = AsmInstruction::getFunctionEndAddress(&function);
+	if (configured.isDefined() && configured.getValue() > start)
+	{
+		return configured.getValue();
+	}
+
+	std::uint64_t recovered = start;
+	for (auto& block : function)
+	{
+		const auto blockStart = recoveredBlockAddress(&block, blockInstructions);
+		if (blockStart >= start
+				&& blockStart < std::numeric_limits<std::uint64_t>::max())
+		{
+			recovered = std::max(recovered, blockStart + 1);
+		}
+
+		const auto found = blockInstructions.find(&block);
+		if (found == blockInstructions.end())
+		{
+			continue;
+		}
+		for (const auto* instruction : found->second)
+		{
+			if (instruction->address < start)
+			{
+				continue;
+			}
+			const auto available = std::numeric_limits<std::uint64_t>::max()
+					- instruction->address;
+			const auto size = std::min<std::uint64_t>(
+					instruction->size, available);
+			recovered = std::max(
+					recovered, instruction->address + size);
+		}
+	}
+	return recovered;
+}
+
 void writeFunctions(
 		Writer& writer,
 		csh handle,
@@ -1346,11 +1390,12 @@ void writeFunctions(
 		{
 			continue;
 		}
-		auto end = AsmInstruction::getFunctionEndAddress(&function);
+		const auto end = recoveredFunctionEnd(
+				function, start.getValue(), blockInstructions);
 		writer.StartObject();
 		key(writer, "name"); writer.String(function.getName().str().c_str());
 		key(writer, "address"); address(writer, start.getValue());
-		key(writer, "end"); address(writer, end.isDefined() ? end.getValue() : start.getValue());
+		key(writer, "end"); address(writer, end);
 		key(writer, "basic_blocks");
 		writer.StartArray();
 		for (auto& block : function)

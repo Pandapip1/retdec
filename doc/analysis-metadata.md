@@ -34,6 +34,13 @@ The writer runs directly after "retdec-decoder". This placement is part of the
 interface: metadata describes recovered machine structure before later LLVM
 passes rewrite the CFG or remove machine-instruction mappings.
 
+Function `end` values are exclusive. RetDec uses the configured function end
+when it is defined and greater than the function address. If that end is
+missing or non-increasing, the writer derives an exclusive bound from the
+function's recovered block addresses and decoded instruction extents. A
+populated recovered function therefore never becomes an empty address range
+merely because its final LLVM instruction lacks a machine mapping.
+
 RetDec may split one machine instruction into several translator-only LLVM
 blocks. Such blocks have no machine address and are not emitted as metadata
 blocks. Their CFG edges are flattened to the next recovered machine block,

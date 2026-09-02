@@ -352,6 +352,30 @@ TEST_F(AnalysisMetadataWriterTests, ExportsIncludeNameOrdinalRvaAndVa)
 	EXPECT_EQ(0x1234u, exported["va"].GetUint64());
 }
 
+TEST_F(AnalysisMetadataWriterTests, DerivesMissingFunctionEndFromDecodedExtent)
+{
+	parseInput(R"(
+		@llvm2asm = global i64 0
+		define void @missing_end() {
+		dec_label_pc_5000:
+			store volatile i64 20480, i64* @llvm2asm
+			ret void
+		}
+	)");
+
+	SyntheticInstruction decoded;
+	setCall(decoded, 0x5000, 0x6000);
+	mapInstructions({&decoded.instruction});
+
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto metadata = writeMetadata(
+			std::make_shared<TestFormat>(input.data(), input.size()));
+	ASSERT_EQ(1u, metadata["functions"].Size());
+	const auto& function = metadata["functions"][0];
+	EXPECT_EQ(0x5000u, function["address"].GetUint64());
+	EXPECT_EQ(0x5005u, function["end"].GetUint64());
+}
+
 TEST_F(AnalysisMetadataWriterTests, FlattensResolvedSwitchThroughTranslatorBlocks)
 {
 	parseInput(R"(
