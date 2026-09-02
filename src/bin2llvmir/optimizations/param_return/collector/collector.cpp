@@ -475,9 +475,12 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	// A fixed-arity x86 call may share its oldest PUSH across several incoming
 	// CFG edges while the remaining PUSHes live in the call block. Follow that
 	// join only when exactly one physical word is missing and every predecessor
-	// ends by writing a decoded PUSH to the same recovered stack slot. This is
-	// deliberately fail-closed: different slots, intervening calls, wide
-	// parameters, or more than one missing word remain unresolved.
+	// ends by writing one machine word for a decoded PUSH. Stack analysis may
+	// have localized some of those destinations while leaving others as raw ESP
+	// expressions, so destination identity is not a valid cross-edge invariant;
+	// the terminal PUSH role on every edge is. This is deliberately fail-closed:
+	// intervening calls, non-word stores, wide parameters, or more than one
+	// missing word remain unresolved.
 	const auto& fixedTypes = ce->getBaseFunction()->argTypes();
 	bool singleWordTypes = slotSize != 0 && !fixedTypes.empty()
 			&& std::all_of(
@@ -491,7 +494,6 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	if (singleWordTypes && provenStores.size() + 1 == fixedTypes.size()
 			&& pred_size(block) > 1)
 	{
-		Value* commonSlot = nullptr;
 		Type* commonType = nullptr;
 		std::vector<std::pair<BasicBlock*, StoreInst*>> incomingPushes;
 		for (BasicBlock* predecessor : predecessors(block))
@@ -518,6 +520,14 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 						? decoded.getCapstoneInsn() : nullptr;
 				if (capstone == nullptr || capstone->id != X86_INS_PUSH)
 				{
+					// An unconditional transfer may carry only the recovered ESP
+					// value into the join. Any other decoded instruction after the
+					// candidate PUSH makes the predecessor non-terminal.
+					if (capstone != nullptr && capstone->id != X86_INS_JMP
+							&& capstone->id != X86_INS_NOP)
+					{
+						break;
+					}
 					continue;
 				}
 				// A decoded PUSH writes both the outgoing stack word and ESP. The
@@ -527,7 +537,15 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 				{
 					continue;
 				}
-				if (_abi->isStackVariable(store->getPointerOperand()))
+				Type* valueType = store->getValueOperand()->getType();
+				bool machineWord = valueType->isSized()
+						&& _module->getDataLayout().getTypeStoreSize(valueType)
+								== slotSize;
+				bool implicitStackDestination =
+						_abi->isStackVariable(store->getPointerOperand())
+						|| (!_abi->isRegister(store->getPointerOperand())
+								&& !isa<GlobalVariable>(store->getPointerOperand()));
+				if (machineWord && implicitStackDestination)
 				{
 					pushStore = store;
 				}
@@ -538,15 +556,12 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 				incomingPushes.clear();
 				break;
 			}
-			Value* slot = pushStore->getPointerOperand()->stripPointerCasts();
 			Type* valueType = pushStore->getValueOperand()->getType();
-			if ((commonSlot != nullptr && commonSlot != slot)
-					|| (commonType != nullptr && commonType != valueType))
+			if (commonType != nullptr && commonType != valueType)
 			{
 				incomingPushes.clear();
 				break;
 			}
-			commonSlot = slot;
 			commonType = valueType;
 			incomingPushes.emplace_back(predecessor, pushStore);
 		}

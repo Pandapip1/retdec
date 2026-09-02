@@ -895,8 +895,10 @@ TEST_F(ParamReturnTests, x86FixedCallMergesOldestPushFromPredecessors)
 			br label %invoke
 		right_path:
 			store volatile i64 4097, i64* @llvm2asm
-			store i32 %right, i32* %stack_arg3
-			%right_esp = ptrtoint i32* %stack_arg3 to i32
+			%right_old_esp = load i32, i32* @esp
+			%right_esp = sub i32 %right_old_esp, 4
+			%right_pointer = inttoptr i32 %right_esp to i32*
+			store i32 %right, i32* %right_pointer
 			store i32 %right_esp, i32* @esp
 			br label %invoke
 		invoke:
