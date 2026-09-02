@@ -202,6 +202,33 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 			source.access = CS_AC_READ;
 		}
 
+		void setMoveImmediateToMemory(
+				SyntheticInstruction& instruction,
+				std::uint64_t address,
+				x86_reg base,
+				std::int64_t displacement,
+				std::int64_t immediate,
+				std::uint8_t size = 4)
+		{
+			instruction.instruction.address = address;
+			instruction.instruction.size = 6;
+			instruction.instruction.id = X86_INS_MOV;
+			instruction.detail.x86.op_count = 2;
+			auto& destination = instruction.detail.x86.operands[0];
+			destination.type = X86_OP_MEM;
+			destination.mem.base = base;
+			destination.mem.index = X86_REG_INVALID;
+			destination.mem.scale = 1;
+			destination.mem.disp = displacement;
+			destination.size = size;
+			destination.access = CS_AC_WRITE;
+			auto& source = instruction.detail.x86.operands[1];
+			source.type = X86_OP_IMM;
+			source.imm = immediate;
+			source.size = size;
+			source.access = CS_AC_READ;
+		}
+
 		void mapInstructions(const std::vector<cs_insn*>& decoded)
 		{
 			auto* mapping = module->getGlobalVariable("llvm2asm");
@@ -466,6 +493,143 @@ TEST_F(AnalysisMetadataWriterTests, TracesImportedReturnThroughStackAndIndexedLo
 	EXPECT_TRUE(flow["ambiguous_merges"].Empty());
 }
 
+TEST_F(AnalysisMetadataWriterTests, PublishesImmediateStoresWithAddressProvenance)
+{
+	parseInput(R"(
+		@llvm2asm = global i64 0
+		define void @publications() {
+		dec_label_pc_1000:
+			store volatile i64 4096, i64* @llvm2asm
+			store volatile i64 4099, i64* @llvm2asm
+			store volatile i64 4102, i64* @llvm2asm
+			store volatile i64 4108, i64* @llvm2asm
+			store volatile i64 4111, i64* @llvm2asm
+			store volatile i64 4114, i64* @llvm2asm
+			ret void
+		}
+	)");
+
+	std::array<SyntheticInstruction, 6> decoded;
+	setMoveMemoryToRegister(
+			decoded[0], 0x1000, X86_REG_EAX,
+			X86_REG_EBP, X86_REG_INVALID, 1, 8);
+	setMoveMemoryToRegister(
+			decoded[1], 0x1003, X86_REG_ECX,
+			X86_REG_EAX, X86_REG_INVALID, 1, 4);
+	setMoveImmediateToMemory(
+			decoded[2], 0x1006, X86_REG_ECX, 0x2c, 0x1800);
+	setMoveMemoryToRegister(
+			decoded[3], 0x100c, X86_REG_EDX,
+			X86_REG_EBP, X86_REG_INVALID, 1, 8);
+	setMoveMemoryToRegister(
+			decoded[4], 0x100f, X86_REG_EBX,
+			X86_REG_EDX, X86_REG_INVALID, 1, 4);
+	setMoveImmediateToMemory(
+			decoded[5], 0x1012, X86_REG_EBX, 0x30, 2);
+	mapInstructions({
+			&decoded[0].instruction,
+			&decoded[1].instruction,
+			&decoded[2].instruction,
+			&decoded[3].instruction,
+			&decoded[4].instruction,
+			&decoded[5].instruction});
+
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto metadata = writeMetadata(
+			std::make_shared<TestFormat>(input.data(), input.size()));
+	const auto& flow = metadata["functions"][0]["value_flow"];
+	const auto& definitions = flow["definitions"];
+	ASSERT_EQ(6u, definitions.Size());
+
+	EXPECT_STREQ("stack_load", definitions[0]["operation"].GetString());
+	const auto& entrySource = definitions[0]["source"];
+	EXPECT_STREQ("stack", entrySource["kind"].GetString());
+	EXPECT_STREQ("ebp", entrySource["base"].GetString());
+	EXPECT_EQ(8, entrySource["displacement"].GetInt64());
+	EXPECT_TRUE(definitions[0]["inputs"].Empty());
+
+	EXPECT_STREQ("pointer_load", definitions[1]["operation"].GetString());
+	const auto& descriptorSource = definitions[1]["source"];
+	EXPECT_STREQ("memory", descriptorSource["kind"].GetString());
+	EXPECT_STREQ("eax", descriptorSource["base"].GetString());
+	EXPECT_EQ(4, descriptorSource["displacement"].GetInt64());
+	ASSERT_EQ(1u, definitions[1]["inputs"].Size());
+	EXPECT_STREQ("base", definitions[1]["inputs"][0]["role"].GetString());
+	EXPECT_EQ(0x1000u,
+			definitions[1]["inputs"][0]["definition"].GetUint64());
+
+	EXPECT_STREQ("pointer_store", definitions[2]["operation"].GetString());
+	EXPECT_EQ(0x1800, definitions[2]["stored_immediate"].GetInt64());
+	EXPECT_EQ(0x2c,
+			definitions[2]["destination"]["displacement"].GetInt64());
+	ASSERT_EQ(1u, definitions[2]["inputs"].Size());
+	EXPECT_EQ(0x1003u,
+			definitions[2]["inputs"][0]["definition"].GetUint64());
+
+	EXPECT_STREQ("pointer_store", definitions[5]["operation"].GetString());
+	EXPECT_EQ(2, definitions[5]["stored_immediate"].GetInt64());
+	EXPECT_EQ(0x30,
+			definitions[5]["destination"]["displacement"].GetInt64());
+	EXPECT_EQ(0x100fu,
+			definitions[5]["inputs"][0]["definition"].GetUint64());
+	EXPECT_TRUE(flow["ambiguous_merges"].Empty());
+}
+
+TEST_F(AnalysisMetadataWriterTests, PublishesImmediateVectorThroughEntryStackValue)
+{
+	parseInput(R"(
+		@llvm2asm = global i64 0
+		define void @vector_publication() {
+		dec_label_pc_1100:
+			store volatile i64 4352, i64* @llvm2asm
+			store volatile i64 4355, i64* @llvm2asm
+			store volatile i64 4361, i64* @llvm2asm
+			store volatile i64 4364, i64* @llvm2asm
+			ret void
+		}
+	)");
+
+	std::array<SyntheticInstruction, 4> decoded;
+	setMoveMemoryToRegister(
+			decoded[0], 0x1100, X86_REG_EAX,
+			X86_REG_EBP, X86_REG_INVALID, 1, 16);
+	setMoveImmediateToMemory(
+			decoded[1], 0x1103, X86_REG_EAX, 0, 0x1800);
+	setMoveMemoryToRegister(
+			decoded[2], 0x1109, X86_REG_ECX,
+			X86_REG_EBP, X86_REG_INVALID, 1, 16);
+	setMoveImmediateToMemory(
+			decoded[3], 0x110c, X86_REG_ECX, 4, 0x1900);
+	mapInstructions({
+			&decoded[0].instruction,
+			&decoded[1].instruction,
+			&decoded[2].instruction,
+			&decoded[3].instruction});
+
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto metadata = writeMetadata(
+			std::make_shared<TestFormat>(input.data(), input.size()));
+	const auto& definitions =
+			metadata["functions"][0]["value_flow"]["definitions"];
+	ASSERT_EQ(4u, definitions.Size());
+	for (rapidjson::SizeType index = 0; index < definitions.Size(); index += 2)
+	{
+		const auto& root = definitions[index];
+		EXPECT_STREQ("stack_load", root["operation"].GetString());
+		EXPECT_EQ(16, root["source"]["displacement"].GetInt64());
+		EXPECT_TRUE(root["inputs"].Empty());
+		const auto& publication = definitions[index + 1];
+		EXPECT_STREQ("pointer_store", publication["operation"].GetString());
+		ASSERT_EQ(1u, publication["inputs"].Size());
+		EXPECT_STREQ(
+				"base", publication["inputs"][0]["role"].GetString());
+		EXPECT_EQ(root["address"].GetUint64(),
+				publication["inputs"][0]["definition"].GetUint64());
+	}
+	EXPECT_EQ(0, definitions[1]["destination"]["displacement"].GetInt64());
+	EXPECT_EQ(4, definitions[3]["destination"]["displacement"].GetInt64());
+}
+
 TEST_F(AnalysisMetadataWriterTests, AmbiguousMergeStopsValueFlow)
 {
 	parseInput(R"(
@@ -514,8 +678,10 @@ TEST_F(AnalysisMetadataWriterTests, AmbiguousMergeStopsValueFlow)
 	EXPECT_EQ(0x2020u, definitions[2]["address"].GetUint64());
 
 	const auto& ambiguities = flow["ambiguous_merges"];
-	ASSERT_EQ(1u, ambiguities.Size());
+	ASSERT_EQ(2u, ambiguities.Size());
+	EXPECT_EQ(0x2030u, ambiguities[0]["use"].GetUint64());
 	EXPECT_EQ(0x2030u, ambiguities[0]["block"].GetUint64());
+	EXPECT_STREQ("value", ambiguities[0]["role"].GetString());
 	EXPECT_STREQ(
 			"ecx", ambiguities[0]["location"]["register"].GetString());
 	ASSERT_EQ(2u, ambiguities[0]["candidate_definitions"].Size());
@@ -524,6 +690,9 @@ TEST_F(AnalysisMetadataWriterTests, AmbiguousMergeStopsValueFlow)
 	EXPECT_EQ(0x2020u,
 			ambiguities[0]["candidate_definitions"][1].GetUint64());
 	EXPECT_FALSE(ambiguities[0]["includes_undefined"].GetBool());
+	EXPECT_EQ(0x2033u, ambiguities[1]["use"].GetUint64());
+	EXPECT_EQ(0x2030u, ambiguities[1]["block"].GetUint64());
+	EXPECT_STREQ("base", ambiguities[1]["role"].GetString());
 }
 
 } // namespace tests
