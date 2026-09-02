@@ -597,12 +597,29 @@ std::optional<int> StackAnalysis::getDecodedIncomingStackOffset(
 		}
 		stackMemory = &operand;
 	}
-	if (stackMemory == nullptr)
+	std::optional<int64_t> displacement;
+	if (stackMemory != nullptr)
+	{
+		displacement = stackMemory->mem.disp;
+	}
+	else if (capstone->id == X86_INS_POP
+			&& x86.op_count == 1
+			&& x86.operands[0].type == X86_OP_REG
+			&& x86.operands[0].reg != X86_REG_ESP)
+	{
+		// Capstone represents POP's stack source implicitly. The decoded load
+		// still reads [ESP] before the instruction advances ESP, so associate
+		// it with the stack delta recorded at the instruction boundary. POP ESP
+		// is intentionally excluded because it replaces the stack pointer with
+		// the loaded value and makes subsequent stack state ambiguous.
+		displacement = 0;
+	}
+	if (!displacement)
 	{
 		return std::nullopt;
 	}
 
-	int64_t offset = found->second + stackMemory->mem.disp;
+	int64_t offset = found->second + *displacement;
 	if (offset < std::numeric_limits<int>::min()
 			|| offset > std::numeric_limits<int>::max())
 	{

@@ -248,6 +248,50 @@ TEST_F(StackAnalysisTests, leavesIncomingStackSlotRawAfterUnequalStackDeltaMerge
 	EXPECT_EQ(getValueByName("merged.pointer"), load->getPointerOperand());
 }
 
+TEST_F(StackAnalysisTests, localizesImplicitPopReadOfSavedRegister)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		define i32 @func() {
+		entry:
+			store volatile i64 4096, i64* @llvm2asm
+			%before_push = load i32, i32* @esp
+			%after_push = sub i32 %before_push, 4
+			store i32 %after_push, i32* @esp
+			store volatile i64 4097, i64* @llvm2asm
+			%pop.sp = load i32, i32* @esp
+			%pop.pointer = inttoptr i32 %pop.sp to i32*
+			%saved_register = load i32, i32* %pop.pointer
+			%after_pop = add i32 %pop.sp, 4
+			store i32 %after_pop, i32* @esp
+			ret i32 %saved_register
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().registers.insert(retdec::common::Object(
+			"esp", retdec::common::Storage::inRegister("esp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"saved_ebx", retdec::common::Storage::onStack(-4)));
+	config.getConfig().functions.insert(function);
+	auto* abi = addX86Abi(config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	SymbolicTree::setAbi(abi);
+	SymbolicTree::setConfig(&config);
+
+	std::vector<SyntheticInstruction> decoded(2);
+	setSimpleInstruction(decoded[0], X86_INS_PUSH, X86_REG_EBX);
+	setSimpleInstruction(decoded[1], X86_INS_POP, X86_REG_EBX);
+	mapSyntheticInstructions(decoded);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+	auto* load = cast<LoadInst>(getValueByName("saved_register"));
+	EXPECT_EQ(config.getLlvmStackVariable(
+			module->getFunction("func"), -4), load->getPointerOperand());
+}
+
 TEST_F(StackAnalysisTests, reconstructsIndexedFrameRelativeStackObject)
 {
 	parseInput(R"(
