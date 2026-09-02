@@ -223,6 +223,123 @@ TEST_F(StackPointerOpsRemoveTests,
 }
 
 TEST_F(StackPointerOpsRemoveTests,
+		removesDecodedStackProbeAfterDeadProbeLoadsAreOptimizedAway)
+{
+	parseInput(R"(
+		@eax = global i32 0
+		@esp = global i32 0
+		define internal i32 @probe() {
+			%size = load i32, i32* @eax
+			%large = icmp uge i32 %size, 4096
+			%next = add i32 %size, -4096
+			%return_address_slot = inttoptr i32 %next to i32*
+			store i32 123, i32* %return_address_slot
+			ret i32 123
+		}
+		define void @caller() {
+			%stack_frame = alloca [5876 x i8], align 4, !retdec.stack.frame.start !0
+			store i32 5868, i32* @eax
+			%ignored = call i32 @probe()
+			store i32 7, i32* @eax
+			store i32 123, i32* @esp
+			%restored_stack_pointer = load i32, i32* @esp
+			ret void
+		}
+		!0 = !{i64 -5872}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().architecture.setIsX86();
+	c.getConfig().architecture.setBitSize(32);
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_EAX, getGlobalByName("eax"));
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
+	EXPECT_TRUE(getFunctionByName("probe")->use_empty());
+}
+
+TEST_F(StackPointerOpsRemoveTests,
+		ignoresUnrelatedCallsWhenCheckingDeadStackProbeOutputs)
+{
+	parseInput(R"(
+		@eax = global i32 0
+		@esp = global i32 0
+		declare void @unrelated(i8*)
+		define internal i32 @probe() {
+			%size = load i32, i32* @eax
+			%large = icmp uge i32 %size, 4096
+			%next = add i32 %size, -4096
+			%address = inttoptr i32 %next to i32*
+			%touch = load i32, i32* %address
+			ret i32 %touch
+		}
+		define void @caller(i8* %pointer) {
+			%stack_frame = alloca [5876 x i8], align 4, !retdec.stack.frame.start !0
+			store i32 5868, i32* @eax
+			%ignored = call i32 @probe()
+			call void @unrelated(i8* %pointer)
+			store i32 7, i32* @eax
+			store i32 123, i32* @esp
+			%restored_stack_pointer = load i32, i32* @esp
+			ret void
+		}
+		!0 = !{i64 -5872}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().architecture.setIsX86();
+	c.getConfig().architecture.setBitSize(32);
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_EAX, getGlobalByName("eax"));
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+
+	EXPECT_TRUE(pass.runOnModuleCustom(*module, &abi));
+	EXPECT_TRUE(getFunctionByName("probe")->use_empty());
+}
+
+TEST_F(StackPointerOpsRemoveTests,
+		keepsStackProbeWhenFollowingCalleeReadsItsRegisterOutput)
+{
+	parseInput(R"(
+		@eax = global i32 0
+		@esp = global i32 0
+		@sink = global i32 0
+		define internal i32 @probe() {
+			%size = load i32, i32* @eax
+			%large = icmp uge i32 %size, 4096
+			%next = add i32 %size, -4096
+			%address = inttoptr i32 %next to i32*
+			%touch = load i32, i32* %address
+			ret i32 %touch
+		}
+		define internal void @observer() {
+			%observed = load i32, i32* @eax
+			store i32 %observed, i32* @sink
+			ret void
+		}
+		define void @caller() {
+			%stack_frame = alloca [5876 x i8], align 4, !retdec.stack.frame.start !0
+			store i32 5868, i32* @eax
+			%ignored = call i32 @probe()
+			call void @observer()
+			store i32 7, i32* @eax
+			store i32 123, i32* @esp
+			%restored_stack_pointer = load i32, i32* @esp
+			ret void
+		}
+		!0 = !{i64 -5872}
+	)");
+	auto c = Config::empty(module.get());
+	c.getConfig().architecture.setIsX86();
+	c.getConfig().architecture.setBitSize(32);
+	AbiX86 abi(module.get(), &c);
+	abi.addRegister(X86_REG_EAX, getGlobalByName("eax"));
+	abi.addRegister(X86_REG_ESP, getGlobalByName("esp"));
+
+	pass.runOnModuleCustom(*module, &abi);
+	EXPECT_NE(nullptr, getValueByName("ignored"));
+}
+
+TEST_F(StackPointerOpsRemoveTests,
 		keepsDecodedStackProbeWhenItsRegisterResultIsObserved)
 {
 	parseInput(R"(

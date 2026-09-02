@@ -684,6 +684,15 @@ bool StackPointerOpsRemove::run()
 
 namespace {
 
+bool usesDecodedIntegerAddress(Value* pointer)
+{
+	while (auto* cast = dyn_cast<BitCastInst>(pointer))
+	{
+		pointer = cast->getOperand(0);
+	}
+	return isa<IntToPtrInst>(pointer);
+}
+
 bool isDecodedStackProbe(Function* function, Abi* abi)
 {
 	if (function == nullptr || function->isDeclaration()
@@ -706,12 +715,16 @@ bool isDecodedStackProbe(Function* function, Abi* abi)
 		if (auto* load = dyn_cast<LoadInst>(&instruction))
 		{
 			readsSize |= load->getPointerOperand() == eax;
-			Value* pointer = load->getPointerOperand();
-			while (auto* cast = dyn_cast<BitCastInst>(pointer))
-			{
-				pointer = cast->getOperand(0);
-			}
-			probesMemory |= isa<IntToPtrInst>(pointer);
+			probesMemory |= usesDecodedIntegerAddress(load->getPointerOperand());
+		}
+		if (auto* store = dyn_cast<StoreInst>(&instruction))
+		{
+			// LLVM may remove an unused TEST [address], register once its flags
+			// are dead.  The canonical x86 stack-probe helper still has to move
+			// the caller's return address through the newly computed integer stack
+			// address, so retain that store as equivalent structural evidence of
+			// decoded memory access.
+			probesMemory |= usesDecodedIntegerAddress(store->getPointerOperand());
 		}
 		if (auto* compare = dyn_cast<ICmpInst>(&instruction))
 		{
@@ -734,6 +747,49 @@ bool isDecodedStackProbe(Function* function, Abi* abi)
 		}
 	}
 	return readsSize && comparesPage && stepsPage && probesMemory;
+}
+
+bool functionReadsRegister(
+		Function* function,
+		Value* reg,
+		std::set<Function*>& visited)
+{
+	// An indirect call can reach arbitrary lifted code.  A direct declaration,
+	// however, has no LLVM body that can read RetDec's architectural register
+	// global; any explicit register-derived argument was already read before the
+	// call and is handled by the caller scan.
+	if (function == nullptr)
+	{
+		return true;
+	}
+	if (function->isDeclaration() || !visited.insert(function).second)
+	{
+		return false;
+	}
+	for (Instruction& instruction : instructions(function))
+	{
+		if (auto* load = dyn_cast<LoadInst>(&instruction))
+		{
+			if (load->getPointerOperand()->stripPointerCasts() == reg)
+			{
+				return true;
+			}
+		}
+		if (auto* call = dyn_cast<CallInst>(&instruction))
+		{
+			if (functionReadsRegister(call->getCalledFunction(), reg, visited))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool callReadsRegister(CallInst* call, Value* reg)
+{
+	std::set<Function*> visited;
+	return functionReadsRegister(call->getCalledFunction(), reg, visited);
 }
 
 bool probeOutputsAreDeadAfterCall(CallInst* call, Abi* abi)
@@ -779,9 +835,12 @@ bool probeOutputsAreDeadAfterCall(CallInst* call, Abi* abi)
 					stackPointerOverwritten = true;
 				}
 			}
-			if (isa<CallInst>(instruction) && !eaxOverwritten)
+			if (auto* followingCall = dyn_cast<CallInst>(instruction))
 			{
-				return false;
+				if (!eaxOverwritten && callReadsRegister(followingCall, eax))
+				{
+					return false;
+				}
 			}
 		}
 
