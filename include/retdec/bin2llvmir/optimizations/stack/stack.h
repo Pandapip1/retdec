@@ -7,6 +7,7 @@
 #ifndef RETDEC_BIN2LLVMIR_OPTIMIZATIONS_STACK_STACK_H
 #define RETDEC_BIN2LLVMIR_OPTIMIZATIONS_STACK_STACK_H
 
+#include <map>
 #include <optional>
 #include <unordered_set>
 
@@ -35,6 +36,12 @@ class StackAnalysis : public llvm::ModulePass
 
 	private:
 		bool run();
+		void computeDecodedStackDeltas(llvm::Function& function);
+		std::optional<int> getDecodedIncomingStackOffset(
+				llvm::Instruction* instruction) const;
+		const retdec::common::Object* getConfigStackVariable(
+				llvm::Function* function,
+				int offset) const;
 		bool reconstructDynamicStackAccesses();
 		void handleInstruction(
 				ReachingDefinitionsAnalysis& RDA,
@@ -57,6 +64,7 @@ class StackAnalysis : public llvm::ModulePass
 		DebugFormat* _dbgf = nullptr;
 
 		std::unordered_set<llvm::Value*> _toRemove;
+		std::map<const llvm::StoreInst*, int64_t> _decodedStackDeltas;
 };
 
 } // namespace bin2llvmir

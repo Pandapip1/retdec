@@ -4,8 +4,11 @@
 * @copyright (c) 2017 Avast Software, licensed under the MIT license
 */
 
+#include <deque>
 #include <limits>
+#include <set>
 
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
@@ -43,6 +46,53 @@ struct AffineStackAddress
 		return valid && base == nullptr && !hasUnknown;
 	}
 };
+
+enum class StackDeltaKind
+{
+	Unreached,
+	Known,
+	Ambiguous
+};
+
+struct StackDelta
+{
+	StackDeltaKind kind = StackDeltaKind::Unreached;
+	int64_t value = 0;
+};
+
+bool mergeStackDelta(StackDelta& destination, const StackDelta& source)
+{
+	if (source.kind == StackDeltaKind::Unreached
+			|| destination.kind == StackDeltaKind::Ambiguous)
+	{
+		return false;
+	}
+	if (destination.kind == StackDeltaKind::Unreached)
+	{
+		destination = source;
+		return true;
+	}
+	if (source.kind == StackDeltaKind::Ambiguous
+			|| destination.value != source.value)
+	{
+		destination.kind = StackDeltaKind::Ambiguous;
+		return true;
+	}
+	return false;
+}
+
+void adjustStackDelta(StackDelta& delta, int64_t adjustment)
+{
+	if ((adjustment > 0
+				&& delta.value > std::numeric_limits<int64_t>::max() - adjustment)
+			|| (adjustment < 0
+					&& delta.value < std::numeric_limits<int64_t>::min() - adjustment))
+	{
+		delta.kind = StackDeltaKind::Ambiguous;
+		return;
+	}
+	delta.value += adjustment;
+}
 
 bool mergeBase(
 		AffineStackAddress& result,
@@ -293,9 +343,11 @@ bool StackAnalysis::run()
 
 	ReachingDefinitionsAnalysis RDA;
 	RDA.runOnModule(*_module, _abi);
+	_decodedStackDeltas.clear();
 
 	for (auto& f : *_module)
 	{
+		computeDecodedStackDeltas(f);
 		std::map<Value*, Value*> val2val;
 		for (inst_iterator I = inst_begin(f), E = inst_end(f); I != E;)
 		{
@@ -348,6 +400,247 @@ bool StackAnalysis::run()
 	IrModifier::eraseUnusedInstructionsRecursive(_toRemove);
 
 	return reconstructDynamicStackAccesses();
+}
+
+/**
+ * Compute each decoded instruction's stack-pointer delta from function entry.
+ *
+ * Symbolic reaching definitions intentionally fail at loop joins when several
+ * stores reach @esp, even when every path has the same native stack effect.
+ * Decoded push/pop instructions retain that machine-level invariant.  Track it
+ * independently, but only through instructions whose effect is certain.  A
+ * conflicting CFG merge or an unknown stack-pointer write poisons the path.
+ */
+void StackAnalysis::computeDecodedStackDeltas(Function& function)
+{
+	for (BasicBlock& block : function)
+	{
+		for (Instruction& instruction : block)
+		{
+			if (auto* marker = dyn_cast<StoreInst>(&instruction))
+			{
+				_decodedStackDeltas.erase(marker);
+			}
+		}
+	}
+	if (function.empty() || !_config->getConfig().architecture.isX86_32())
+	{
+		return;
+	}
+
+	std::map<BasicBlock*, StackDelta> entries;
+	entries[&function.getEntryBlock()] = {StackDeltaKind::Known, 0};
+	std::deque<BasicBlock*> worklist{&function.getEntryBlock()};
+	std::set<BasicBlock*> queued{&function.getEntryBlock()};
+	const int64_t slotSize = _config->getConfig().architecture.getByteSize();
+
+	while (!worklist.empty())
+	{
+		BasicBlock* block = worklist.front();
+		worklist.pop_front();
+		queued.erase(block);
+		StackDelta delta = entries[block];
+
+		for (Instruction& instruction : *block)
+		{
+			auto* marker = dyn_cast<StoreInst>(&instruction);
+			if (marker == nullptr
+					|| !AsmInstruction::isLlvmToAsmInstruction(marker))
+			{
+				continue;
+			}
+			_decodedStackDeltas.erase(marker);
+			if (delta.kind == StackDeltaKind::Known)
+			{
+				_decodedStackDeltas[marker] = delta.value;
+			}
+
+			AsmInstruction decoded(marker);
+			cs_insn* capstone = decoded.getCapstoneInsn();
+			if (delta.kind != StackDeltaKind::Known || capstone == nullptr
+					|| capstone->detail == nullptr)
+			{
+				delta.kind = StackDeltaKind::Ambiguous;
+				continue;
+			}
+
+			switch (capstone->id)
+			{
+				case X86_INS_PUSH:
+					adjustStackDelta(delta, -slotSize);
+					continue;
+				case X86_INS_POP:
+				{
+					auto& operands = capstone->detail->x86;
+					if (operands.op_count != 0
+							&& operands.operands[0].type == X86_OP_REG
+							&& operands.operands[0].reg == X86_REG_ESP)
+					{
+						delta.kind = StackDeltaKind::Ambiguous;
+					}
+					else
+					{
+						adjustStackDelta(delta, slotSize);
+					}
+					continue;
+				}
+				case X86_INS_CALL:
+				{
+					CallInst* call = decoded.getInstructionFirst<CallInst>();
+					auto* callee = call == nullptr ? nullptr : call->getCalledFunction();
+					auto* configFunction = callee == nullptr
+							? nullptr : _config->getConfigFunction(callee);
+					auto& operands = capstone->detail->x86;
+					if (configFunction == nullptr && operands.op_count == 1
+							&& operands.operands[0].type == X86_OP_IMM)
+					{
+						configFunction = _config->getConfigFunction(
+								retdec::common::Address(operands.operands[0].imm));
+					}
+					bool callerClean = configFunction != nullptr
+							&& (configFunction->callingConvention.isCdecl()
+									|| configFunction->callingConvention.isEllipsis()
+									|| configFunction->callingConvention.isVoidarg()
+									|| (configFunction->callingConvention.isUnknown()
+											&& _abi->getDefaultCallingConventionID()
+													== CallingConvention::ID::CC_CDECL));
+					if (!callerClean)
+					{
+						delta.kind = StackDeltaKind::Ambiguous;
+					}
+					continue;
+				}
+				default:
+					break;
+			}
+
+			auto& x86 = capstone->detail->x86;
+			bool writesStackPointer = false;
+			for (unsigned i = 0; i < x86.op_count; ++i)
+			{
+				auto& operand = x86.operands[i];
+				writesStackPointer |= operand.type == X86_OP_REG
+						&& operand.reg == X86_REG_ESP
+						&& (operand.access & CS_AC_WRITE) != 0;
+			}
+			if (!writesStackPointer)
+			{
+				continue;
+			}
+
+			if ((capstone->id == X86_INS_ADD || capstone->id == X86_INS_SUB)
+					&& x86.op_count == 2
+					&& x86.operands[0].type == X86_OP_REG
+					&& x86.operands[0].reg == X86_REG_ESP
+					&& x86.operands[1].type == X86_OP_IMM)
+			{
+				int64_t adjustment = x86.operands[1].imm;
+				if (capstone->id == X86_INS_SUB
+						&& adjustment == std::numeric_limits<int64_t>::min())
+				{
+					delta.kind = StackDeltaKind::Ambiguous;
+				}
+				else
+				{
+					adjustStackDelta(delta, capstone->id == X86_INS_ADD
+							? adjustment : -adjustment);
+				}
+			}
+			else
+			{
+				delta.kind = StackDeltaKind::Ambiguous;
+			}
+		}
+
+		for (BasicBlock* successor : successors(block))
+		{
+			if (mergeStackDelta(entries[successor], delta)
+					&& queued.insert(successor).second)
+			{
+				worklist.push_back(successor);
+			}
+		}
+	}
+}
+
+std::optional<int> StackAnalysis::getDecodedIncomingStackOffset(
+		Instruction* instruction) const
+{
+	if (!isa<LoadInst>(instruction)
+			|| !_config->getConfig().architecture.isX86_32())
+	{
+		return std::nullopt;
+	}
+	AsmInstruction decoded(instruction);
+	auto found = _decodedStackDeltas.find(decoded.getLlvmToAsmInstruction());
+	cs_insn* capstone = decoded.getCapstoneInsn();
+	if (found == _decodedStackDeltas.end() || capstone == nullptr
+			|| capstone->detail == nullptr)
+	{
+		return std::nullopt;
+	}
+
+	const cs_x86_op* stackMemory = nullptr;
+	auto& x86 = capstone->detail->x86;
+	for (unsigned i = 0; i < x86.op_count; ++i)
+	{
+		auto& operand = x86.operands[i];
+		if (operand.type != X86_OP_MEM || operand.mem.base != X86_REG_ESP
+				|| operand.mem.index != X86_REG_INVALID
+				|| ((operand.access & CS_AC_READ) == 0 && operand.access != 0))
+		{
+			continue;
+		}
+		if (stackMemory != nullptr)
+		{
+			return std::nullopt;
+		}
+		stackMemory = &operand;
+	}
+	if (stackMemory == nullptr)
+	{
+		return std::nullopt;
+	}
+
+	int64_t offset = found->second + stackMemory->mem.disp;
+	if (offset < std::numeric_limits<int>::min()
+			|| offset > std::numeric_limits<int>::max())
+	{
+		return std::nullopt;
+	}
+	int narrowedOffset = static_cast<int>(offset);
+	int64_t firstIncomingOffset =
+			_config->getConfig().architecture.getByteSize();
+	// A positive offset beyond the return address is structurally an incoming
+	// stack slot, even before parameter recovery has materialized an object for
+	// it.  Non-incoming offsets still require an existing configured object.
+	if (offset < firstIncomingOffset
+			&& getConfigStackVariable(
+					instruction->getFunction(), narrowedOffset) == nullptr)
+	{
+		return std::nullopt;
+	}
+	return narrowedOffset;
+}
+
+const retdec::common::Object* StackAnalysis::getConfigStackVariable(
+		Function* function,
+		int offset) const
+{
+	auto* configFunction = _config->getConfigFunction(function);
+	if (configFunction == nullptr)
+	{
+		return nullptr;
+	}
+	for (auto& variable : configFunction->locals)
+	{
+		if (variable.getStorage().isStack()
+				&& variable.getStorage().getStackOffset() == offset)
+		{
+			return &variable;
+		}
+	}
+	return nullptr;
 }
 
 /**
@@ -513,6 +806,7 @@ void StackAnalysis::handleInstruction(
 
 	auto root = SymbolicTree::PrecomputedRdaWithValueMap(RDA, val, &val2val);
 	LOG << root << std::endl;
+	auto decodedOffset = getDecodedIncomingStackOffset(inst);
 
 	if (!root.isVal2ValMapUsed())
 	{
@@ -525,7 +819,7 @@ void StackAnalysis::handleInstruction(
 				break;
 			}
 		}
-		if (!stackPtr)
+		if (!stackPtr && !decodedOffset)
 		{
 			LOG << "===> no SP" << std::endl;
 			return;
@@ -549,6 +843,19 @@ void StackAnalysis::handleInstruction(
 	}
 
 	auto* ci = dyn_cast_or_null<ConstantInt>(root.value);
+	if (ci == nullptr)
+	{
+		if (decodedOffset)
+		{
+			ci = ConstantInt::getSigned(
+					Type::getInt64Ty(_module->getContext()), *decodedOffset);
+			if (configSv == nullptr)
+			{
+				configSv = getConfigStackVariable(
+						inst->getFunction(), *decodedOffset);
+			}
+		}
+	}
 	if (ci == nullptr)
 	{
 		return;

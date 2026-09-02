@@ -4,9 +4,12 @@
 * @copyright (c) 2017 Avast Software, licensed under the MIT license
 */
 
+#include <llvm/IR/InstIterator.h>
+
 #include "retdec/bin2llvmir/optimizations/stack/stack.h"
 #include "retdec/bin2llvmir/optimizations/stack_pointer_ops/stack_pointer_ops.h"
 #include "retdec/bin2llvmir/providers/abi/abi.h"
+#include "retdec/bin2llvmir/providers/asm_instruction.h"
 #include "retdec/bin2llvmir/providers/config.h"
 #include "bin2llvmir/utils/llvmir_tests.h"
 
@@ -19,6 +22,72 @@ namespace tests {
 class StackAnalysisTests: public LlvmIrTests
 {
 	protected:
+		struct SyntheticInstruction
+		{
+			cs_insn instruction = {};
+			cs_detail detail = {};
+
+			SyntheticInstruction()
+			{
+				instruction.detail = &detail;
+			}
+		};
+
+		void setStackMemoryInstruction(
+				SyntheticInstruction& instruction,
+				unsigned id,
+				int displacement)
+		{
+			instruction.instruction.id = id;
+			instruction.instruction.size = 1;
+			instruction.detail.x86.op_count = 1;
+			auto& operand = instruction.detail.x86.operands[0];
+			operand.type = X86_OP_MEM;
+			operand.mem.base = X86_REG_ESP;
+			operand.mem.index = X86_REG_INVALID;
+			operand.mem.scale = 1;
+			operand.mem.disp = displacement;
+			operand.size = 4;
+			operand.access = CS_AC_READ;
+		}
+
+		void setSimpleInstruction(
+				SyntheticInstruction& instruction,
+				unsigned id,
+				x86_reg operand = X86_REG_INVALID)
+		{
+			instruction.instruction.id = id;
+			instruction.instruction.size = 1;
+			if (operand != X86_REG_INVALID)
+			{
+				instruction.detail.x86.op_count = 1;
+				instruction.detail.x86.operands[0].type = X86_OP_REG;
+				instruction.detail.x86.operands[0].reg = operand;
+			}
+		}
+
+		void mapSyntheticInstructions(
+				std::vector<SyntheticInstruction>& decoded)
+		{
+			AsmInstruction::setLlvmToAsmGlobalVariable(
+					module.get(), module->getGlobalVariable("llvm2asm"));
+			unsigned index = 0;
+			for (Function& function : *module)
+			for (Instruction& instruction : instructions(function))
+			{
+				auto* marker = dyn_cast<StoreInst>(&instruction);
+				if (marker != nullptr && marker->getPointerOperand()
+						== module->getGlobalVariable("llvm2asm"))
+				{
+					ASSERT_LT(index, decoded.size());
+					decoded[index].instruction.address = 0x1000 + index;
+					AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
+							= &decoded[index++].instruction;
+				}
+			}
+			ASSERT_EQ(decoded.size(), index);
+		}
+
 		Abi* addX86Abi(Config& config)
 		{
 			config.getConfig().architecture.setIsX86();
@@ -28,6 +97,156 @@ class StackAnalysisTests: public LlvmIrTests
 
 		StackAnalysis pass;
 };
+
+TEST_F(StackAnalysisTests, localizesIncomingStackSlotsAcrossBalancedRetryLoop)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @allocator()
+		define i32 @func(i1 %retry) {
+		entry:
+			store volatile i64 4096, i64* @llvm2asm
+			%entry.sp = load i32, i32* @esp
+			%entry.address = add i32 %entry.sp, 4
+			%entry.pointer = inttoptr i32 %entry.address to i32*
+			%initial_size = load i32, i32* %entry.pointer
+			br label %loop
+		loop:
+			store volatile i64 4097, i64* @llvm2asm
+			%loop.sp = load i32, i32* @esp
+			%loop.address = add i32 %loop.sp, 4
+			%loop.pointer = inttoptr i32 %loop.address to i32*
+			%loop_size = load i32, i32* %loop.pointer
+			%pushed.sp = sub i32 %loop.sp, 4
+			store i32 %pushed.sp, i32* @esp
+			store volatile i64 4098, i64* @llvm2asm
+			%allocated = call i32 @allocator()
+			store volatile i64 4099, i64* @llvm2asm
+			%called.sp = load i32, i32* @esp
+			%popped.sp = add i32 %called.sp, 4
+			store i32 %popped.sp, i32* @esp
+			store volatile i64 4100, i64* @llvm2asm
+			%compare.sp = load i32, i32* @esp
+			%compare.address = add i32 %compare.sp, 8
+			%compare.pointer = inttoptr i32 %compare.address to i32*
+			%retry_limit = load i32, i32* %compare.pointer
+			br i1 %retry, label %retry_block, label %done
+		retry_block:
+			store volatile i64 4101, i64* @llvm2asm
+			%retry.sp = load i32, i32* @esp
+			%retry.address = add i32 %retry.sp, 4
+			%retry.pointer = inttoptr i32 %retry.address to i32*
+			%retry_size = load i32, i32* %retry.pointer
+			%retry.pushed.sp = sub i32 %retry.sp, 4
+			store i32 %retry.pushed.sp, i32* @esp
+			store volatile i64 4102, i64* @llvm2asm
+			%retried = call i32 @allocator()
+			store volatile i64 4103, i64* @llvm2asm
+			%retry.called.sp = load i32, i32* @esp
+			%retry.popped.sp = add i32 %retry.called.sp, 4
+			store i32 %retry.popped.sp, i32* @esp
+			br label %loop
+		done:
+			%sum1 = add i32 %initial_size, %loop_size
+			%sum2 = add i32 %sum1, %retry_limit
+			%sum3 = add i32 %sum2, %retry_size
+			%sum4 = add i32 %sum3, %allocated
+			%sum5 = add i32 %sum4, %retried
+			ret i32 %sum5
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().registers.insert(retdec::common::Object(
+			"esp", retdec::common::Storage::inRegister("esp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"first_argument", retdec::common::Storage::onStack(4)));
+	for (const char* name : {"first_argument", "second_argument"})
+	{
+		retdec::common::Object parameter(name, retdec::common::Storage());
+		parameter.type.setLlvmIr("i32");
+		function.parameters.push_back(parameter);
+	}
+	function.callingConvention.setIsCdecl();
+	config.getConfig().functions.insert(function);
+	auto allocator = retdec::common::Function("allocator");
+	allocator.callingConvention.setIsCdecl();
+	config.getConfig().functions.insert(allocator);
+	auto* abi = addX86Abi(config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	SymbolicTree::setAbi(abi);
+	SymbolicTree::setConfig(&config);
+
+	std::vector<SyntheticInstruction> decoded(8);
+	setStackMemoryInstruction(decoded[0], X86_INS_CMP, 4);
+	setStackMemoryInstruction(decoded[1], X86_INS_PUSH, 4);
+	setSimpleInstruction(decoded[2], X86_INS_CALL);
+	setSimpleInstruction(decoded[3], X86_INS_POP, X86_REG_ECX);
+	setStackMemoryInstruction(decoded[4], X86_INS_CMP, 8);
+	setStackMemoryInstruction(decoded[5], X86_INS_PUSH, 4);
+	setSimpleInstruction(decoded[6], X86_INS_CALL);
+	setSimpleInstruction(decoded[7], X86_INS_POP, X86_REG_ECX);
+	mapSyntheticInstructions(decoded);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+	for (const char* name : {"initial_size", "loop_size", "retry_size"})
+	{
+		auto* load = cast<LoadInst>(getValueByName(name));
+		EXPECT_EQ(config.getLlvmStackVariable(
+				module->getFunction("func"), 4), load->getPointerOperand());
+	}
+	auto* retryLimit = cast<LoadInst>(getValueByName("retry_limit"));
+	EXPECT_EQ(config.getLlvmStackVariable(
+			module->getFunction("func"), 8), retryLimit->getPointerOperand());
+}
+
+TEST_F(StackAnalysisTests, leavesIncomingStackSlotRawAfterUnequalStackDeltaMerge)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		define i32 @func(i1 %condition) {
+		entry:
+			br i1 %condition, label %balanced, label %pushed
+		balanced:
+			br label %merge
+		pushed:
+			store volatile i64 4096, i64* @llvm2asm
+			%before_push = load i32, i32* @esp
+			%after_push = sub i32 %before_push, 4
+			store i32 %after_push, i32* @esp
+			br label %merge
+		merge:
+			store volatile i64 4097, i64* @llvm2asm
+			%merged.sp = load i32, i32* @esp
+			%merged.address = add i32 %merged.sp, 4
+			%merged.pointer = inttoptr i32 %merged.address to i32*
+			%ambiguous_load = load i32, i32* %merged.pointer
+			ret i32 %ambiguous_load
+		}
+	)");
+
+	auto config = Config::empty(module.get());
+	config.getConfig().registers.insert(retdec::common::Object(
+			"esp", retdec::common::Storage::inRegister("esp")));
+	auto function = retdec::common::Function("func");
+	function.locals.insert(retdec::common::Object(
+			"first_argument", retdec::common::Storage::onStack(4)));
+	config.getConfig().functions.insert(function);
+	auto* abi = addX86Abi(config);
+	SymbolicTree::setAbi(abi);
+	SymbolicTree::setConfig(&config);
+	std::vector<SyntheticInstruction> decoded(2);
+	setSimpleInstruction(decoded[0], X86_INS_PUSH, X86_REG_EAX);
+	setStackMemoryInstruction(decoded[1], X86_INS_CMP, 4);
+	mapSyntheticInstructions(decoded);
+
+	pass.runOnModuleCustom(*module, &config, abi);
+	auto* load = cast<LoadInst>(getValueByName("ambiguous_load"));
+	EXPECT_EQ(getValueByName("merged.pointer"), load->getPointerOperand());
+}
 
 TEST_F(StackAnalysisTests, reconstructsIndexedFrameRelativeStackObject)
 {
