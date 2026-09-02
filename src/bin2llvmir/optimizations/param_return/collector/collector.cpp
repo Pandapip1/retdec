@@ -547,6 +547,22 @@ void Collector::collectX86CallArgs(CallEntry* ce) const
 	// is the native argument order even when older stack stores follow it.
 	ce->preserveNativeStackOrder(!directStores.empty()
 			|| (hasProvenStack && allProvenStackStoresAreDecodedPushes));
+	if (ce->preservesNativeStackOrder() && hasProvenStack)
+	{
+		// A callee-cleanup call has no caller-side cleanup bound.  A write to
+		// an unrelated local may consequently appear between the decoded PUSH
+		// of an argument and the call (for example, initializing the object
+		// whose address was just pushed).  Backward traversal encounters that
+		// speculative local first.  Keep decoded outgoing stack writes in their
+		// native order, but rank them ahead of merely possible stack locals so a
+		// fixed callee signature consumes the actual PUSH values.
+		std::stable_partition(
+				stores.begin(), stores.end(),
+				[&provenStores](StoreInst* store)
+				{
+					return provenStores.count(store) != 0;
+				});
+	}
 	for (auto* store : directStores)
 	{
 		ce->addDirectArgStore(store);

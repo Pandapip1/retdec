@@ -785,6 +785,96 @@ TEST_F(ParamReturnTests, x86CalleeCleanupKeepsDecodedPushOrderPastOlderStackStor
 	EXPECT_FALSE(verifyModule(*module, &errs()));
 }
 
+TEST_F(ParamReturnTests, x86CalleeCleanupPrefersDecodedPushOverLaterLocalWrite)
+{
+	parseInput(R"(
+		@esp = global i32 0
+		@llvm2asm = global i64 0
+		declare i32 @consume()
+		define i32 @caller() {
+			%object = alloca i32
+			%callee_save = alloca i32
+			%outgoing = alloca i32*
+			store volatile i64 4096, i64* @llvm2asm
+			store i32 77, i32* %callee_save
+			store volatile i64 4097, i64* @llvm2asm
+			store i32* %object, i32** %outgoing
+			store volatile i64 4098, i64* @llvm2asm
+			store i32 148, i32* %object
+			store volatile i64 4099, i64* @llvm2asm
+			%result = call i32 @consume()
+			ret i32 %result
+		}
+	)");
+	auto config = Config::empty(module.get());
+	config.getConfig().architecture.setIsX86();
+	config.getConfig().architecture.setBitSize(32);
+	auto callerConfig = retdec::common::Function("caller");
+	callerConfig.locals.insert(retdec::common::Object(
+			"callee_save", retdec::common::Storage::onStack(-4)));
+	callerConfig.locals.insert(retdec::common::Object(
+			"outgoing", retdec::common::Storage::onStack(-8)));
+	callerConfig.locals.insert(retdec::common::Object(
+			"object", retdec::common::Storage::onStack(-156)));
+	config.getConfig().functions.insert(callerConfig);
+	auto consumeConfig = retdec::common::Function("consume");
+	consumeConfig.setIsUserDefined();
+	retdec::common::Object parameter("object", retdec::common::Storage());
+	parameter.type.setLlvmIr("i32*");
+	consumeConfig.parameters.push_back(parameter);
+	config.getConfig().functions.insert(consumeConfig);
+	auto* abi = AbiProvider::addAbi(module.get(), &config);
+	abi->addRegister(X86_REG_ESP, module->getGlobalVariable("esp"));
+	AsmInstruction::setLlvmToAsmGlobalVariable(
+			module.get(), module->getGlobalVariable("llvm2asm"));
+	cs_insn decoded[4] = {};
+	decoded[0].id = X86_INS_PUSH;
+	decoded[1].id = X86_INS_PUSH;
+	decoded[2].id = X86_INS_MOV;
+	decoded[3].id = X86_INS_CALL;
+	unsigned markerIndex = 0;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* marker = dyn_cast<StoreInst>(&instruction);
+		if (marker != nullptr && marker->getPointerOperand()
+				== module->getGlobalVariable("llvm2asm"))
+		{
+			ASSERT_LT(markerIndex, 4u);
+			decoded[markerIndex].address = 0x1000 + markerIndex;
+			decoded[markerIndex].size = 1;
+			AsmInstruction::getLlvmToCapstoneInsnMap(module.get())[marker]
+					= &decoded[markerIndex++];
+		}
+	}
+	ASSERT_EQ(4u, markerIndex);
+	auto typeConfig = std::make_unique<ctypesparser::TypeConfig>();
+	auto* demangler = DemanglerProvider::addDemangler(
+			module.get(), &config, std::move(typeConfig));
+	auto image = FileImage(module.get(), createFormat(), &config);
+	auto ltiTypeConfig = std::make_shared<ctypesparser::TypeConfig>();
+	auto* lti = LtiProvider::addLti(
+			module.get(), &config, ltiTypeConfig, image.getImage());
+
+	pass.runOnModuleCustom(
+			*module, &config, abi, demangler, &image, nullptr, lti);
+
+	auto* consume = module->getFunction("consume");
+	ASSERT_NE(nullptr, consume);
+	CallInst* recoveredCall = nullptr;
+	for (auto& instruction : instructions(module->getFunction("caller")))
+	{
+		auto* candidate = dyn_cast<CallInst>(&instruction);
+		if (candidate != nullptr && candidate->getCalledFunction() == consume)
+		{
+			recoveredCall = candidate;
+		}
+	}
+	ASSERT_NE(nullptr, recoveredCall);
+	ASSERT_EQ(1u, recoveredCall->arg_size());
+	EXPECT_EQ(getValueByName("object"), recoveredCall->getArgOperand(0));
+	EXPECT_FALSE(verifyModule(*module, &errs()));
+}
+
 TEST_F(ParamReturnTests, x86DirectArgumentTracksReplacedStoredValue)
 {
 	parseInput(R"(
