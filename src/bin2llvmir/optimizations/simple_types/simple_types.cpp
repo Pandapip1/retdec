@@ -1233,6 +1233,25 @@ void EqSet::apply(
 	IrModifier irModif(module, config);
 	for (auto& vs : valSet)
 	{
+		// A recovered image global is an allocation boundary.  Its declaration
+		// determines how much backing storage native code reserves, so a type
+		// inferred from one selected root must not shrink or widen that storage.
+		// Equal-width refinements (for example, an integer to a pointer) remain
+		// useful and safe.  Explicit debug or library information may override the
+		// recovered width because it describes the object rather than merely one
+		// of its uses.
+		if (auto* global = dyn_cast<GlobalVariable>(vs.value))
+		{
+			if (masterType.priority == eSourcePriority::PRIORITY_NONE
+					&& masterType.type != nullptr
+					&& module->getDataLayout().getTypeStoreSize(
+							global->getValueType())
+						!= module->getDataLayout().getTypeStoreSize(masterType.type))
+			{
+				continue;
+			}
+		}
+
 		// An exported function's recovered parameter types are an ABI boundary:
 		// external callers cannot be rewritten when an internal use merely
 		// suggests another type.  Arithmetic may extend a value internally (for

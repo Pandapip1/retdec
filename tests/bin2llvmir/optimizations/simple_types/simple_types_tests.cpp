@@ -119,6 +119,56 @@ TEST_F(SimpleTypesTests, inferredWideUseDoesNotWidenRecoveredInternalParameterSl
 	EXPECT_TRUE(call->getArgOperand(0)->getType()->isIntegerTy(32));
 }
 
+TEST_F(SimpleTypesTests, inferredNarrowUseDoesNotShrinkRecoveredGlobalStorage)
+{
+	parseInput(R"(
+		@tls_index = global i32 -1
+
+		define i1 @is_tls_unallocated() {
+		entry:
+		  %index = load i32, i32* @tls_index
+		  %flag = trunc i32 %index to i1
+		  ret i1 %flag
+		}
+	)");
+	auto configJson = config::Config::fromJsonString(R"({
+		"architecture" : {
+			"bitSize" : 32,
+			"endian" : "little",
+			"name" : "x86"
+		},
+		"globals" : [
+			{
+				"name" : "tls_index",
+				"storage" : {
+					"type" : "global",
+					"value" : "0x1000"
+				},
+				"type" : { "llvmIr" : "i32" }
+			}
+		]
+	})");
+	auto* config = ConfigProvider::addConfig(module.get(), configJson);
+	ASSERT_NE(nullptr, config);
+	FileImageProvider::addFileImage(module.get(), createFormat(), config);
+	AbiProvider::addAbi(module.get(), config);
+
+	// SimpleTypes alternates its analysis and string-refinement phases.  Running
+	// twice makes the regression independent of which phase the process starts
+	// with and exercises the inference phase exactly once.
+	SimpleTypesAnalysis firstPass;
+	firstPass.runOnModule(*module);
+	SimpleTypesAnalysis secondPass;
+	secondPass.runOnModule(*module);
+
+	auto* global = module->getGlobalVariable("tls_index");
+	ASSERT_NE(nullptr, global);
+	EXPECT_TRUE(global->getValueType()->isIntegerTy(32));
+	auto* configured = config->getConfig().globals.getObjectByName("tls_index");
+	ASSERT_NE(nullptr, configured);
+	EXPECT_EQ("i32", configured->type.getLlvmIr());
+}
+
 } // namespace tests
 } // namespace bin2llvmir
 } // namespace retdec
