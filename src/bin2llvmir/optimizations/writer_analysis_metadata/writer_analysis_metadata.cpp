@@ -1327,12 +1327,10 @@ std::uint64_t recoveredFunctionEnd(
 		const BlockInstructions& blockInstructions)
 {
 	const auto configured = AsmInstruction::getFunctionEndAddress(&function);
-	if (configured.isDefined() && configured.getValue() > start)
-	{
-		return configured.getValue();
-	}
-
-	std::uint64_t recovered = start;
+	std::uint64_t recovered = configured.isDefined()
+			&& configured.getValue() > start
+			? configured.getValue()
+			: start;
 	for (auto& block : function)
 	{
 		const auto blockStart = recoveredBlockAddress(&block, blockInstructions);
@@ -1362,6 +1360,35 @@ std::uint64_t recoveredFunctionEnd(
 		}
 	}
 	return recovered;
+}
+
+void writeCoverage(Writer& writer, const retdec::config::Parameters& parameters)
+{
+	const bool complete = !parameters.isSelectedDecodeOnly();
+	key(writer, "coverage");
+	writer.StartObject();
+	key(writer, "kind");
+	writer.String(complete ? "full_image" : "selected_decode");
+	key(writer, "complete");
+	writer.Bool(complete);
+	key(writer, "selected_ranges");
+	writer.StartArray();
+	for (const auto& range : parameters.selectedRanges)
+	{
+		writer.StartObject();
+		key(writer, "start"); address(writer, range.getStart().getValue());
+		key(writer, "end"); address(writer, range.getEnd().getValue());
+		writer.EndObject();
+	}
+	writer.EndArray();
+	key(writer, "selected_functions");
+	writer.StartArray();
+	for (const auto& function : parameters.selectedFunctions)
+	{
+		writer.String(function.c_str());
+	}
+	writer.EndArray();
+	writer.EndObject();
 }
 
 void writeFunctions(
@@ -1505,6 +1532,7 @@ bool AnalysisMetadataWriter::runOnModule(llvm::Module& module)
 	format->getImageBaseAddress(imageBase);
 	key(writer, "image_base"); address(writer, imageBase);
 	writer.EndObject();
+	writeCoverage(writer, config->getConfig().parameters);
 	writeSections(writer, *format);
 	writeImports(writer, *format);
 	writeExports(writer, *format);

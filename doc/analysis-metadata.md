@@ -10,6 +10,8 @@ The top-level schema is "retdec-analysis-metadata-v1". Version 1 contains:
 
 - input path, byte size, SHA-256 content digest, architecture, bit width, and
   image base;
+- decode coverage, distinguishing a complete image analysis from selected
+  ranges/functions;
 - file sections with virtual/file extents and permissions;
 - imports keyed by image address and library, plus structurally recognized
   import thunks keyed by thunk and IAT addresses;
@@ -30,16 +32,28 @@ The input size and SHA-256 identify the exact bytes RetDec analyzed. Consumers
 may therefore reject stale cached metadata even when an input is renamed,
 moved, or replaced at the same path.
 
+The top-level `coverage` object records whether decoding covered the complete
+image. `kind` is `full_image` with `complete: true` unless
+`--select-decode-only` was used. A selective decode instead has kind
+`selected_decode`, `complete: false`, and records the requested exclusive
+`selected_ranges` plus `selected_functions`. Consumers performing exhaustive
+function, CFG, call-graph, or reference queries must require
+`coverage.complete == true`; absence of `coverage` in older version-1 output is
+unknown coverage and must fail closed for those queries. Partial metadata is
+still useful for explicitly range-scoped inspection, but it must not be used as
+proof that an omitted block, function, or reference does not exist.
+
 The writer runs directly after "retdec-decoder". This placement is part of the
 interface: metadata describes recovered machine structure before later LLVM
 passes rewrite the CFG or remove machine-instruction mappings.
 
-Function `end` values are exclusive. RetDec uses the configured function end
-when it is defined and greater than the function address. If that end is
-missing or non-increasing, the writer derives an exclusive bound from the
-function's recovered block addresses and decoded instruction extents. A
-populated recovered function therefore never becomes an empty address range
-merely because its final LLVM instruction lacks a machine mapping.
+Function `end` values are exclusive. RetDec combines the apparent end from LLVM
+block order with every recovered block address and decoded instruction extent,
+and uses their maximum. A populated recovered function therefore never becomes
+an empty or truncated address range merely because its final LLVM block lacks a
+machine mapping or is not the highest-address block. This maximum is computed
+only from blocks already owned by that LLVM function; it does not absorb bytes
+from a neighboring or disjoint function.
 
 RetDec may split one machine instruction into several translator-only LLVM
 blocks. Such blocks have no machine address and are not emitted as metadata

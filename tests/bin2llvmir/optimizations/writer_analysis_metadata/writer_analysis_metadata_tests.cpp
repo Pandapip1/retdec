@@ -44,8 +44,11 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 
 				void addImport(std::uint64_t address)
 				{
-					importTable = new fileformat::ImportTable();
-					importTable->addLibrary("fixture.dll");
+					if (importTable == nullptr)
+					{
+						importTable = new fileformat::ImportTable();
+						importTable->addLibrary("fixture.dll");
+					}
 					auto imported = std::make_unique<fileformat::Import>();
 					imported->setAddress(address);
 					imported->setLibraryIndex(0);
@@ -97,6 +100,49 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 			operand.type = X86_OP_IMM;
 			operand.imm = target;
 			operand.size = 4;
+		}
+
+		void setConditionalJump(
+				SyntheticInstruction& instruction,
+				std::uint64_t address,
+				std::uint64_t target)
+		{
+			instruction.instruction.address = address;
+			instruction.instruction.size = 2;
+			instruction.instruction.id = X86_INS_JNE;
+			instruction.detail.x86.op_count = 1;
+			auto& operand = instruction.detail.x86.operands[0];
+			operand.type = X86_OP_IMM;
+			operand.imm = target;
+			operand.size = 4;
+		}
+
+		void setImportedTailJump(
+				SyntheticInstruction& instruction,
+				std::uint64_t address,
+				std::uint64_t iatAddress)
+		{
+			instruction.instruction.address = address;
+			instruction.instruction.size = 6;
+			instruction.instruction.id = X86_INS_JMP;
+			instruction.detail.x86.op_count = 1;
+			auto& operand = instruction.detail.x86.operands[0];
+			operand.type = X86_OP_MEM;
+			operand.mem.base = X86_REG_INVALID;
+			operand.mem.index = X86_REG_INVALID;
+			operand.mem.scale = 1;
+			operand.mem.disp = iatAddress;
+			operand.size = 4;
+			operand.access = CS_AC_READ;
+		}
+
+		void setReturn(
+				SyntheticInstruction& instruction,
+				std::uint64_t address)
+		{
+			instruction.instruction.address = address;
+			instruction.instruction.size = 1;
+			instruction.instruction.id = X86_INS_RET;
 		}
 
 		void setMoveRegisterToStack(
@@ -256,7 +302,8 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 		}
 
 		rapidjson::Document writeMetadata(
-				const std::shared_ptr<fileformat::FileFormat>& format)
+				const std::shared_ptr<fileformat::FileFormat>& format,
+				bool selectedDecodeOnly = false)
 		{
 			llvm::SmallString<128> outputPath;
 			int outputDescriptor = -1;
@@ -270,6 +317,13 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 			configDb.architecture.setBitSize(32);
 			configDb.parameters.setInputFile("fixture.bin");
 			configDb.parameters.setOutputAnalysisMetadataFile(outputPath.str().str());
+			configDb.parameters.setIsSelectedDecodeOnly(selectedDecodeOnly);
+			if (selectedDecodeOnly)
+			{
+				configDb.parameters.selectedRanges.insert(
+						common::AddressRange(0x1000, 0x1100));
+				configDb.parameters.selectedFunctions.insert("selected_entry");
+			}
 			auto* config = ConfigProvider::addConfig(module.get(), configDb);
 			EXPECT_NE(nullptr, config);
 			EXPECT_NE(nullptr,
@@ -289,6 +343,32 @@ class AnalysisMetadataWriterTests : public LlvmIrTests
 			return metadata;
 		}
 };
+
+TEST_F(AnalysisMetadataWriterTests, CoverageDistinguishesFullAndSelectedDecode)
+{
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto format = std::make_shared<TestFormat>(input.data(), input.size());
+	auto full = writeMetadata(format);
+	ASSERT_TRUE(full.HasMember("coverage"));
+	EXPECT_STREQ("full_image", full["coverage"]["kind"].GetString());
+	EXPECT_TRUE(full["coverage"]["complete"].GetBool());
+	EXPECT_TRUE(full["coverage"]["selected_ranges"].Empty());
+	EXPECT_TRUE(full["coverage"]["selected_functions"].Empty());
+
+	auto selected = writeMetadata(format, true);
+	ASSERT_TRUE(selected.HasMember("coverage"));
+	EXPECT_STREQ(
+			"selected_decode", selected["coverage"]["kind"].GetString());
+	EXPECT_FALSE(selected["coverage"]["complete"].GetBool());
+	ASSERT_EQ(1u, selected["coverage"]["selected_ranges"].Size());
+	EXPECT_EQ(0x1000u,
+			selected["coverage"]["selected_ranges"][0]["start"].GetUint64());
+	EXPECT_EQ(0x1100u,
+			selected["coverage"]["selected_ranges"][0]["end"].GetUint64());
+	ASSERT_EQ(1u, selected["coverage"]["selected_functions"].Size());
+	EXPECT_STREQ("selected_entry",
+			selected["coverage"]["selected_functions"][0].GetString());
+}
 
 TEST_F(AnalysisMetadataWriterTests, InputIdentityDescribesExactAnalyzedBytes)
 {
@@ -374,6 +454,109 @@ TEST_F(AnalysisMetadataWriterTests, DerivesMissingFunctionEndFromDecodedExtent)
 	const auto& function = metadata["functions"][0];
 	EXPECT_EQ(0x5000u, function["address"].GetUint64());
 	EXPECT_EQ(0x5005u, function["end"].GetUint64());
+}
+
+TEST_F(AnalysisMetadataWriterTests, FunctionEndUsesHighestDecodedCfgExtent)
+{
+	parseInput(R"(
+		@llvm2asm = global i64 0
+		define void @nonlinear_layout() {
+		dec_label_pc_5000:
+			store volatile i64 20480, i64* @llvm2asm
+			br i1 true, label %dec_label_pc_5030, label %dec_label_pc_5010
+		dec_label_pc_5030:
+			store volatile i64 20528, i64* @llvm2asm
+			ret void
+		dec_label_pc_5010:
+			store volatile i64 20496, i64* @llvm2asm
+			ret void
+		}
+	)");
+
+	std::array<SyntheticInstruction, 3> decoded;
+	setCall(decoded[0], 0x5000, 0x6000);
+	setCall(decoded[1], 0x5030, 0x6000);
+	setCall(decoded[2], 0x5010, 0x6000);
+	mapInstructions({
+			&decoded[0].instruction,
+			&decoded[1].instruction,
+			&decoded[2].instruction});
+
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto metadata = writeMetadata(
+			std::make_shared<TestFormat>(input.data(), input.size()));
+	ASSERT_EQ(1u, metadata["functions"].Size());
+	EXPECT_EQ(0x5035u, metadata["functions"][0]["end"].GetUint64());
+}
+
+TEST_F(AnalysisMetadataWriterTests, RetainsConditionalPeImportTailBlocks)
+{
+	parseInput(R"(
+		@llvm2asm = global i64 0
+		define void @conditional_import_tails() {
+		dec_label_pc_1000:
+			store volatile i64 4096, i64* @llvm2asm
+			br i1 true, label %dec_label_pc_1010, label %dec_label_pc_1020
+		dec_label_pc_1010:
+			store volatile i64 4112, i64* @llvm2asm
+			ret void
+		dec_label_pc_1020:
+			store volatile i64 4128, i64* @llvm2asm
+			br i1 true, label %dec_label_pc_1030, label %dec_label_pc_1040
+		dec_label_pc_1030:
+			store volatile i64 4144, i64* @llvm2asm
+			ret void
+		dec_label_pc_1040:
+			store volatile i64 4160, i64* @llvm2asm
+			ret void
+		}
+	)");
+
+	std::array<SyntheticInstruction, 5> decoded;
+	setConditionalJump(decoded[0], 0x1000, 0x1020);
+	setImportedTailJump(decoded[1], 0x1010, 0x3000);
+	setConditionalJump(decoded[2], 0x1020, 0x1040);
+	setImportedTailJump(decoded[3], 0x1030, 0x3004);
+	setReturn(decoded[4], 0x1040);
+	mapInstructions({
+			&decoded[0].instruction,
+			&decoded[1].instruction,
+			&decoded[2].instruction,
+			&decoded[3].instruction,
+			&decoded[4].instruction});
+
+	const std::array<std::uint8_t, 1> input = {{0}};
+	auto format = std::make_shared<TestFormat>(input.data(), input.size());
+	format->addImport(0x3000);
+	format->addImport(0x3004);
+	auto metadata = writeMetadata(format);
+
+	ASSERT_EQ(1u, metadata["functions"].Size());
+	const auto& function = metadata["functions"][0];
+	EXPECT_EQ(0x1041u, function["end"].GetUint64());
+	ASSERT_EQ(5u, function["basic_blocks"].Size());
+	EXPECT_EQ(0x1010u, function["basic_blocks"][1]["address"].GetUint64());
+	EXPECT_TRUE(function["basic_blocks"][1]["successors"].Empty());
+	EXPECT_EQ(0x1030u, function["basic_blocks"][3]["address"].GetUint64());
+	EXPECT_TRUE(function["basic_blocks"][3]["successors"].Empty());
+
+	ASSERT_EQ(2u, metadata["import_thunks"].Size());
+	EXPECT_EQ(0x1010u, metadata["import_thunks"][0]["address"].GetUint64());
+	EXPECT_EQ(0x3000u,
+			metadata["import_thunks"][0]["iat_address"].GetUint64());
+	EXPECT_EQ(0x1030u, metadata["import_thunks"][1]["address"].GetUint64());
+	EXPECT_EQ(0x3004u,
+			metadata["import_thunks"][1]["iat_address"].GetUint64());
+
+	unsigned importReferences = 0;
+	for (const auto& reference : metadata["references"].GetArray())
+	{
+		if (std::string(reference["kind"].GetString()) == "import")
+		{
+			++importReferences;
+		}
+	}
+	EXPECT_EQ(2u, importReferences);
 }
 
 TEST_F(AnalysisMetadataWriterTests, FlattensResolvedSwitchThroughTranslatorBlocks)
